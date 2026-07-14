@@ -26,7 +26,13 @@ local function promptForApiKey()
             bind_to_object = props,
             spacing = f:control_spacing(),
             f:static_text {
-                title = "Get your API key from https://my.plantnet.org/account (API access tab)",
+                title = "Get your API key here (API access tab):",
+            },
+            f:push_button {
+                title = "https://my.plantnet.org/account",
+                action = function()
+                    LrHttp.openUrlInBrowser("https://my.plantnet.org/account")
+                end,
             },
             f:edit_field {
                 value = LrView.bind("apiKey"),
@@ -83,7 +89,7 @@ end
 local function callApi(photoPaths, organ, apiKey)
     local boundary = "----WhatIsThisThingBoundary" .. tostring(math.random(1000000000))
     local body = buildMultipartBody(boundary, photoPaths, organ)
-    local url = API_URL .. "?api-key=" .. apiKey
+    local url = API_URL .. "?api-key=" .. apiKey .. "&detailed=true"
 
     local headers = {
         { field = "Content-Type", value = "multipart/form-data; boundary=" .. boundary },
@@ -94,9 +100,34 @@ local function callApi(photoPaths, organ, apiKey)
     return response, status
 end
 
+-- Extracts a { score, scientificName, commonName, rank } list from one of
+-- otherResults' "genus" or "family" arrays (each entry keyed by that same
+-- name, e.g. entry.genus / entry.family).
+local function parseOtherResultsGroup(group, key)
+    local parsed = {}
+    for _, entry in ipairs(group or {}) do
+        local taxon = entry[key] or {}
+        local commonNames = taxon.commonNames or {}
+        table.insert(parsed, {
+            score = (entry.score or 0) * 100,
+            scientificName = taxon.scientificName or "unknown",
+            commonName = commonNames[1],
+            rank = key,
+        })
+    end
+    return parsed
+end
+
 -- Runs the lookup, prompting for the API key if missing and re-prompting once
--- on auth failure. Returns a list of { score, scientificName, commonName }
--- entries, highest score first (the API already returns them sorted).
+-- on auth failure. Returns { results, genusResults, familyResults }:
+--   results       - list of { score, scientificName, commonName }, species
+--                    level, highest score first (the API returns them sorted).
+--   genusResults  - list of { score, scientificName, commonName, rank="genus" },
+--                    from the "detailed" otherResults.genus rollup.
+--   familyResults - same shape, rank="family", from otherResults.family.
+-- genusResults/familyResults are always populated (Pl@ntNet computes them
+-- unconditionally when detailed=true, unlike iNaturalist's confidence-gated
+-- common_ancestor) but may be empty tables if otherResults is absent.
 function PlantNet.identify(photoPaths, organ)
     organ = organ or DEFAULT_ORGAN
 
@@ -136,7 +167,11 @@ function PlantNet.identify(photoPaths, organ)
         })
     end
 
-    return results
+    local otherResults = decoded.otherResults or {}
+    local genusResults = parseOtherResultsGroup(otherResults.genus, "genus")
+    local familyResults = parseOtherResultsGroup(otherResults.family, "family")
+
+    return { results = results, genusResults = genusResults, familyResults = familyResults }
 end
 
 return PlantNet

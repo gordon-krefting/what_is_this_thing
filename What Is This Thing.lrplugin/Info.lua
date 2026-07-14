@@ -6,8 +6,12 @@ return {
 
     LrExportMenuItems = {
         {
-            title = "What is this Thing?",
-            file = "WhatIsThisThing.lua",
+            title = "What is This Plant?",
+            file = "WhatIsThisPlant.lua",
+        },
+        {
+            title = "What is This Animal?",
+            file = "WhatIsThisAnimal.lua",
         },
     },
 
