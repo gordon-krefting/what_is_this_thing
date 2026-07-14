@@ -28,6 +28,27 @@ local function bestMatching(results, wantSpecies)
     return best
 end
 
+local function wikipediaUrl(name)
+    local titled = name:gsub(" ", "_")
+    titled = titled:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    return "https://en.wikipedia.org/wiki/" .. titled
+end
+
+-- iNaturalist's own vision API already gives us each candidate's taxon id,
+-- so the iNat link is free -- no extra lookup needed. Wikipedia's
+-- consistent /wiki/Genus_species title pattern works reasonably well for
+-- higher ranks too (e.g. "Lampyridae"), so it's added for every row.
+local function linksForCandidate(r)
+    local links = {}
+    if r.id then
+        table.insert(links, { label = "iNat", url = "https://www.inaturalist.org/taxa/" .. tostring(r.id) })
+    end
+    table.insert(links, { label = "Wikipedia", url = wikipediaUrl(r.scientificName) })
+    return links
+end
+
 LrTasks.startAsyncTask(function()
     local catalog = LrApplication.activeCatalog()
     local photos = catalog:getTargetPhotos()
@@ -98,7 +119,7 @@ LrTasks.startAsyncTask(function()
             end
         end
 
-        local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint)
+        local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint, linksForCandidate)
 
         if selected then
             -- Best-effort enrichment: getMajorAncestry degrades to an empty

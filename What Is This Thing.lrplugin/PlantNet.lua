@@ -120,8 +120,12 @@ end
 
 -- Runs the lookup, prompting for the API key if missing and re-prompting once
 -- on auth failure. Returns { results, genusResults, familyResults }:
---   results       - list of { score, scientificName, commonName }, species
---                    level, highest score first (the API returns them sorted).
+--   results       - list of { score, scientificName, authorship, commonName },
+--                    species level, highest score first (the API returns
+--                    them sorted). authorship (e.g. "Raf.") is nil for
+--                    genus/family entries below; Pl@ntNet's own web pages
+--                    (identify.plantnet.org) key species pages on
+--                    "scientificName authorship" together, not the bare name.
 --   genusResults  - list of { score, scientificName, commonName, rank="genus" },
 --                    from the "detailed" otherResults.genus rollup.
 --   familyResults - same shape, rank="family", from otherResults.family.
@@ -163,6 +167,7 @@ function PlantNet.identify(photoPaths, organ)
         table.insert(results, {
             score = (r.score or 0) * 100,
             scientificName = species.scientificNameWithoutAuthor or "unknown",
+            authorship = species.scientificNameAuthorship,
             commonName = commonNames[1],
         })
     end

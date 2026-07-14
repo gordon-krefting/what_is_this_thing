@@ -14,6 +14,59 @@ local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"
 -- of the top species guess.
 local CONFIDENCE_THRESHOLD = 85
 
+local function urlEncode(str)
+    return (str:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+local function wikipediaUrl(name)
+    local titled = name:gsub(" ", "_")
+    titled = titled:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    return "https://en.wikipedia.org/wiki/" .. titled
+end
+
+-- Pl@ntNet's own species pages key on "scientificName authorship" together
+-- (e.g. "Tradescantia ohiensis Raf."), confirmed against a real cited
+-- example plus our own captured API response ("bestMatch": "Tradescantia
+-- ohiensis Raf."). Only species-level results carry an authorship (and a
+-- confirmed URL pattern) -- genus/family rollup entries have neither, so
+-- those rows get no Pl@ntNet link, just iNat search + Wikipedia.
+--
+-- KNOWN LIMITATION: when a species has been taxonomically reclassified,
+-- Pl@ntNet's identification API returns the current accepted name, but
+-- their own website's species pages can still be filed under the older
+-- synonym -- e.g. the API says "Securigera varia (L.) Lassen" while their
+-- site only has a page for "Coronilla varia L.", so the link 404s. There's
+-- no cheap way to detect this from the API response (would need a GBIF
+-- synonym lookup per candidate, too slow for populating every dialog row),
+-- so this is accepted as an occasional dead link rather than fixed -- the
+-- iNat/Wikipedia links alongside it are a fallback for exactly this case.
+local function linksForCandidate(r)
+    local links = {}
+
+    if not r.rank then
+        local name = r.scientificName
+        if r.authorship then
+            name = name .. " " .. r.authorship
+        end
+        table.insert(links, {
+            label = "Pl@ntNet",
+            url = "https://identify.plantnet.org/k-world-flora/species/" .. urlEncode(name) .. "/data",
+        })
+    end
+
+    table.insert(links, {
+        label = "iNat",
+        url = "https://www.inaturalist.org/taxa/search?q=" .. urlEncode(r.scientificName),
+    })
+    table.insert(links, { label = "Wikipedia", url = wikipediaUrl(r.scientificName) })
+
+    return links
+end
+
 LrTasks.startAsyncTask(function()
     local catalog = LrApplication.activeCatalog()
     local photos = catalog:getTargetPhotos()
@@ -90,7 +143,7 @@ LrTasks.startAsyncTask(function()
             table.insert(candidates, r)
         end
 
-        local selected = CandidatePicker.choose("What is This Plant?", candidates, defaultIndex, hint)
+        local selected = CandidatePicker.choose("What is This Plant?", candidates, defaultIndex, hint, linksForCandidate)
 
         if selected then
             -- Resolve through iNaturalist's taxonomy (by name -- Pl@ntNet
