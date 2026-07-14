@@ -66,7 +66,7 @@ LrTasks.startAsyncTask(function()
             functionContext = context,
         }
 
-        local exportOk, photoPathsOrError, tempDir = LrTasks.pcall(ExportTemp.exportToTempJpegs, photos)
+        local exportOk, photoPathsOrError, tempDir, sourcePhotos = LrTasks.pcall(ExportTemp.exportToTempJpegs, photos)
 
         if not exportOk then
             progressScope:done()
@@ -76,7 +76,22 @@ LrTasks.startAsyncTask(function()
 
         local photoPaths = photoPathsOrError
 
-        local ok, resultsOrError = LrTasks.pcall(INaturalist.identifyAll, photoPaths, function(i, n)
+        -- Pair each exported path with its source photo's GPS (if any) so
+        -- iNaturalist's geo-based accuracy boost applies wherever possible.
+        local photoEntries = {}
+        local missingGpsCount = 0
+        for i, path in ipairs(photoPaths) do
+            local gps = sourcePhotos[i] and sourcePhotos[i]:getRawMetadata("gps")
+            local lat, lng = nil, nil
+            if gps and gps.latitude and gps.longitude then
+                lat, lng = gps.latitude, gps.longitude
+            else
+                missingGpsCount = missingGpsCount + 1
+            end
+            table.insert(photoEntries, { path = path, lat = lat, lng = lng })
+        end
+
+        local ok, resultsOrError = LrTasks.pcall(INaturalist.identifyAll, photoEntries, function(i, n)
             if n > 1 then
                 progressScope:setCaption(string.format("Looking up species (%d/%d)...", i, n))
             else
@@ -99,12 +114,26 @@ LrTasks.startAsyncTask(function()
             return
         end
 
+        local hintLines = {}
+
+        if missingGpsCount > 0 then
+            if #photoPaths == 1 then
+                table.insert(hintLines,
+                    "Note: this photo has no GPS location data -- iNaturalist's location-based accuracy boost won't apply.")
+            else
+                table.insert(hintLines, string.format(
+                    "Note: %d of %d selected photos have no GPS location data -- "
+                        .. "iNaturalist's location-based accuracy boost won't apply for those.",
+                    missingGpsCount, #photoPaths
+                ))
+            end
+        end
+
         -- iNaturalist's per-photo common_ancestor rollups (if any) are
         -- already folded into `results` by identifyAll/mergeResults, so
         -- preselecting the best non-species entry covers both the
         -- single-photo and multi-photo cases.
         local defaultIndex = 1
-        local hint = nil
         local bestSpecies = bestMatching(results, true)
         if not bestSpecies or bestSpecies.score < CONFIDENCE_THRESHOLD then
             local bestBroader = bestMatching(results, false)
@@ -115,9 +144,11 @@ LrTasks.startAsyncTask(function()
                         break
                     end
                 end
-                hint = "Low confidence at species level -- best broader match preselected:"
+                table.insert(hintLines, "Low confidence at species level -- best broader match preselected:")
             end
         end
+
+        local hint = #hintLines > 0 and table.concat(hintLines, "\n") or nil
 
         local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint, linksForCandidate)
 

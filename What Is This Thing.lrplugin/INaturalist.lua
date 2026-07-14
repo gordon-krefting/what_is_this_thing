@@ -72,7 +72,12 @@ local function storeToken(token)
     prefs.inaturalistToken = token
 end
 
-local function buildMultipartBody(boundary, photoPath)
+-- lat/lng, if given, feed iNaturalist's own geo-based accuracy boost (a
+-- "frequency_score" folded into combined_score, confirmed in their
+-- computervision_controller.js source) -- confirmed via that same source
+-- that score_image does NOT extract location from the uploaded image's own
+-- EXIF, only from these explicit request fields.
+local function buildMultipartBody(boundary, photoPath, lat, lng)
     local fileName = LrPathUtils.leafName(photoPath)
     local data = LrFileUtils.readFile(photoPath)
 
@@ -82,13 +87,26 @@ local function buildMultipartBody(boundary, photoPath)
     parts[#parts + 1] = "Content-Type: application/octet-stream\r\n\r\n"
     parts[#parts + 1] = data
     parts[#parts + 1] = "\r\n"
+
+    if lat and lng then
+        parts[#parts + 1] = "--" .. boundary .. "\r\n"
+        parts[#parts + 1] = 'Content-Disposition: form-data; name="lat"\r\n\r\n'
+        parts[#parts + 1] = tostring(lat)
+        parts[#parts + 1] = "\r\n"
+
+        parts[#parts + 1] = "--" .. boundary .. "\r\n"
+        parts[#parts + 1] = 'Content-Disposition: form-data; name="lng"\r\n\r\n'
+        parts[#parts + 1] = tostring(lng)
+        parts[#parts + 1] = "\r\n"
+    end
+
     parts[#parts + 1] = "--" .. boundary .. "--\r\n"
     return table.concat(parts)
 end
 
-local function callApi(photoPath, token)
+local function callApi(photoPath, token, lat, lng)
     local boundary = "----WhatIsThisThingBoundary" .. tostring(math.random(1000000000))
-    local body = buildMultipartBody(boundary, photoPath)
+    local body = buildMultipartBody(boundary, photoPath, lat, lng)
 
     local headers = {
         { field = "Content-Type", value = "multipart/form-data; boundary=" .. boundary },
@@ -100,9 +118,31 @@ local function callApi(photoPath, token)
     return response, status
 end
 
+-- Turns a non-200 response into a readable message: pulls the "error" field
+-- out of the JSON body if present (iNaturalist's own error responses are
+-- shaped like { "error": "...", "status": ... }), falling back to the raw
+-- body if it doesn't parse. 5xx errors get a note that it's likely on
+-- iNaturalist's end, not something wrong with the photo or token.
+local function friendlyErrorMessage(status, response)
+    local ok, decoded = pcall(JSON.decode, response)
+    local detail = ok and decoded and decoded.error
+
+    if status and status >= 500 then
+        local suffix = detail and (" (\"" .. detail .. "\")") or ""
+        return "iNaturalist's servers had trouble processing this image" .. suffix
+            .. ". This is usually temporary on their end -- try again in a moment."
+    end
+
+    if detail then
+        return "iNaturalist request failed (status " .. tostring(status) .. "): " .. detail
+    end
+    return "iNaturalist request failed (status " .. tostring(status) .. "):\n" .. tostring(response)
+end
+
 -- Runs the lookup for a single photo, prompting for the API token if missing
--- and re-prompting once on auth failure (tokens expire after 24h). Returns
--- { results, commonAncestor }:
+-- and re-prompting once on auth failure (tokens expire after 24h). lat/lng
+-- are optional (pass both or neither) and feed iNaturalist's own geo-based
+-- accuracy boost when given. Returns { results, commonAncestor }:
 --   results        - list of { id, score, scientificName, commonName, rank },
 --                     highest score first.
 --   commonAncestor - { id, score, scientificName, commonName, rank } or nil.
@@ -111,7 +151,7 @@ end
 --                     to pick one, rolling the score up to a shared ancestor
 --                     taxon (e.g. a family) instead. Not present on every
 --                     response.
-function INaturalist.identify(photoPath)
+function INaturalist.identify(photoPath, lat, lng)
     local token = getStoredToken()
     if not token or token == "" then
         token = promptForToken()
@@ -120,18 +160,25 @@ function INaturalist.identify(photoPath)
         end
     end
 
-    local response, status = callApi(photoPath, token)
+    local response, status = callApi(photoPath, token, lat, lng)
 
     if status == 401 then
         token = promptForToken()
         if not token then
             error("No iNaturalist API token provided.")
         end
-        response, status = callApi(photoPath, token)
+        response, status = callApi(photoPath, token, lat, lng)
+    end
+
+    if status and status >= 500 then
+        -- iNaturalist's vision backend occasionally fails on a given
+        -- request (e.g. "Error scoring image") for reasons unrelated to
+        -- our request itself; one retry often clears it.
+        response, status = callApi(photoPath, token, lat, lng)
     end
 
     if status ~= 200 then
-        error("iNaturalist request failed (status " .. tostring(status) .. "):\n" .. tostring(response))
+        error(friendlyErrorMessage(status, response))
     end
 
     storeToken(token)
@@ -323,16 +370,18 @@ function INaturalist.mergeResults(perPhotoResults)
     return merged
 end
 
--- Runs identify() for every photo (calling onProgress(i, n) before each, if
--- given) and merges the results. Works for a single photo too -- averaging
--- over N=1 is a no-op, so this is the only entry point callers need.
-function INaturalist.identifyAll(photoPaths, onProgress)
+-- Runs identify() for every entry in `photoEntries` (each a
+-- { path, lat, lng } table -- lat/lng optional) calling onProgress(i, n)
+-- before each, if given, and merges the results. Works for a single photo
+-- too -- averaging over N=1 is a no-op, so this is the only entry point
+-- callers need.
+function INaturalist.identifyAll(photoEntries, onProgress)
     local perPhoto = {}
-    for i, path in ipairs(photoPaths) do
+    for i, entry in ipairs(photoEntries) do
         if onProgress then
-            onProgress(i, #photoPaths)
+            onProgress(i, #photoEntries)
         end
-        table.insert(perPhoto, INaturalist.identify(path))
+        table.insert(perPhoto, INaturalist.identify(entry.path, entry.lat, entry.lng))
     end
     return INaturalist.mergeResults(perPhoto)
 end
