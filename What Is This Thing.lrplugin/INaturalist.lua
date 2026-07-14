@@ -6,12 +6,20 @@ local LrView = import 'LrView'
 local LrBinding = import 'LrBinding'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
+local LrTasks = import 'LrTasks'
 
 local JSON = dofile(LrPathUtils.child(_PLUGIN.path, "JSON.lua"))
 
 local INaturalist = {}
 
 local API_URL = "https://api.inaturalist.org/v1/computervision/score_image"
+local TAXA_URL = "https://api.inaturalist.org/v1/taxa/"
+local TAXA_SEARCH_URL = "https://api.inaturalist.org/v1/taxa"
+
+-- Ranks worth showing as their own level in a keyword hierarchy -- skips
+-- kingdom/phylum (near-useless for browsing a personal photo library) and
+-- the various sub/infra/super/tribe in-between ranks.
+local MAJOR_RANKS = { class = true, order = true, family = true, genus = true }
 
 local function promptForToken()
     local token = nil
@@ -155,6 +163,97 @@ function INaturalist.identify(photoPath)
     end
 
     return { results = results, commonAncestor = commonAncestor }
+end
+
+-- Fetches the major-rank ancestry (class, order, family, genus -- whichever
+-- are present) for an iNaturalist taxon id, ordered from broadest to
+-- narrowest. Returns a list of { rank, name, commonName } entries
+-- (commonName may be nil), or an empty list if the taxon id is nil or the
+-- lookup fails for any reason -- this is an optional enrichment for keyword
+-- hierarchy, so a failure here should never block the core tag/title/
+-- caption write. No API token needed; this is a public read endpoint.
+function INaturalist.getMajorAncestry(taxonId)
+    if not taxonId then
+        return {}
+    end
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, TAXA_URL .. tostring(taxonId))
+    if not ok then
+        return {}
+    end
+    local status = hdrs and hdrs.status
+    if status ~= 200 then
+        return {}
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk then
+        return {}
+    end
+
+    local taxon = decoded.results and decoded.results[1]
+    if not taxon then
+        return {}
+    end
+
+    local ancestry = {}
+    for _, a in ipairs(taxon.ancestors or {}) do
+        if MAJOR_RANKS[a.rank] then
+            table.insert(ancestry, { rank = a.rank, name = a.name, commonName = a.preferred_common_name })
+        end
+    end
+    return ancestry
+end
+
+local function urlEncode(str)
+    return (str:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
+-- Resolves a scientific name (optionally constrained to a rank, e.g.
+-- "species"/"genus"/"family") to an iNaturalist taxon id via their public
+-- taxa search, requiring an exact (case-sensitive) name match against the
+-- results -- so a fuzzy/wrong match is never silently accepted. Returns nil
+-- if no exact match is found or the request fails.
+local function findTaxonId(scientificName, rank)
+    local url = TAXA_SEARCH_URL .. "?q=" .. urlEncode(scientificName) .. "&per_page=10"
+    if rank then
+        url = url .. "&rank=" .. urlEncode(rank)
+    end
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
+    if not ok then
+        return nil
+    end
+    local status = hdrs and hdrs.status
+    if status ~= 200 then
+        return nil
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk then
+        return nil
+    end
+
+    for _, r in ipairs(decoded.results or {}) do
+        if r.name == scientificName then
+            return r.id
+        end
+    end
+    return nil
+end
+
+-- Like getMajorAncestry, but for a bare scientific name that has no
+-- iNaturalist taxon id of its own (e.g. a Pl@ntNet result, which only
+-- carries a GBIF id) -- so both plant and animal identifications end up
+-- filed under the same taxonomic tree. `rank` (species/genus/family, if
+-- known) narrows the name search to avoid an unlikely cross-rank homonym
+-- match. Returns {} if no exact name match is found or either request
+-- fails; this is an optional enrichment, never required.
+function INaturalist.getMajorAncestryByName(scientificName, rank)
+    local taxonId = findTaxonId(scientificName, rank)
+    return INaturalist.getMajorAncestry(taxonId)
 end
 
 -- Merge key for a taxon entry -- prefer the numeric taxon id (stable across

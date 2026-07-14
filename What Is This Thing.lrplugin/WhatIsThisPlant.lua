@@ -5,22 +5,14 @@ local LrPathUtils = import 'LrPathUtils'
 local LrFunctionContext = import 'LrFunctionContext'
 
 local PlantNet = dofile(LrPathUtils.child(_PLUGIN.path, "PlantNet.lua"))
+local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
+local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
+local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 
--- Below this confidence (%), lead with the best family/genus rollup instead
--- of a pile of uncertain species guesses.
+-- Below this confidence (%), preselect the best family/genus rollup instead
+-- of the top species guess.
 local CONFIDENCE_THRESHOLD = 85
-
-local function formatEntry(r)
-    local label = r.scientificName
-    if r.commonName then
-        label = r.commonName .. " (" .. r.scientificName .. ")"
-    end
-    if r.rank then
-        label = label .. " [" .. r.rank .. "]"
-    end
-    return string.format("%5.1f%%  %s", r.score, label)
-end
 
 LrTasks.startAsyncTask(function()
     local catalog = LrApplication.activeCatalog()
@@ -70,33 +62,45 @@ LrTasks.startAsyncTask(function()
             return
         end
 
-        local lines = {}
+        -- Pl@ntNet's "detailed" rollup always includes these when available
+        -- (unlike iNaturalist's confidence-gated common ancestor), so fold
+        -- the best family/genus entries in as selectable candidates too,
+        -- preselecting family (or genus, if no family) when species
+        -- confidence is low.
+        local candidates = {}
+        local defaultIndex = 1
+        local hint = nil
 
         local bestSpecies = results[1]
         if bestSpecies.score < CONFIDENCE_THRESHOLD then
-            -- Pl@ntNet's "detailed" rollup always includes these when
-            -- available, unlike iNaturalist's confidence-gated common
-            -- ancestor -- lead with whichever of family/genus is present.
             if familyResults[1] then
-                table.insert(lines, "Low confidence at species level -- best family match:")
-                table.insert(lines, "  " .. formatEntry(familyResults[1]))
-                table.insert(lines, "")
+                table.insert(candidates, familyResults[1])
+                defaultIndex = #candidates
+                hint = "Low confidence at species level -- best family match preselected:"
             end
             if genusResults[1] then
-                table.insert(lines, "Best genus match:")
-                table.insert(lines, "  " .. formatEntry(genusResults[1]))
-                table.insert(lines, "")
+                table.insert(candidates, genusResults[1])
+                if not hint then
+                    defaultIndex = #candidates
+                    hint = "Low confidence at species level -- best genus match preselected:"
+                end
             end
         end
-
         for _, r in ipairs(results) do
-            table.insert(lines, formatEntry(r))
+            table.insert(candidates, r)
         end
 
-        LrDialogs.message(
-            "Pl@ntNet Suggestions",
-            table.concat(lines, "\n"),
-            "info"
-        )
+        local selected = CandidatePicker.choose("What is This Plant?", candidates, defaultIndex, hint)
+
+        if selected then
+            -- Resolve through iNaturalist's taxonomy (by name -- Pl@ntNet
+            -- results carry a GBIF id, not an iNat one) so plant and animal
+            -- identifications end up filed under the same taxonomic tree.
+            -- Best-effort: degrades to an empty list (flat "Species ID >
+            -- name" tag) on any failure, never blocking the core write.
+            local ancestry = INaturalist.getMajorAncestryByName(selected.scientificName, selected.rank)
+            KeywordWriter.applyIdentification(photos, selected, ancestry)
+            LrDialogs.message("What is This Plant?", "Tagged with: " .. selected.scientificName, "info")
+        end
     end)
 end)

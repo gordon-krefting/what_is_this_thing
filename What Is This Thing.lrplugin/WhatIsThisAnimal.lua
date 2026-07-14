@@ -6,9 +6,11 @@ local LrFunctionContext = import 'LrFunctionContext'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
+local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
+local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 
--- Below this confidence (%), prefer a coarser (non-species) match over a
--- pile of uncertain species guesses, if the merged results offer one.
+-- Below this confidence (%), preselect the best non-species entry (already
+-- folded into the merged results) instead of the top species guess.
 local CONFIDENCE_THRESHOLD = 85
 
 local function isSpecies(r)
@@ -24,17 +26,6 @@ local function bestMatching(results, wantSpecies)
         end
     end
     return best
-end
-
-local function formatEntry(r)
-    local label = r.scientificName
-    if r.commonName then
-        label = r.commonName .. " (" .. r.scientificName .. ")"
-    end
-    if r.rank and r.rank ~= "species" then
-        label = label .. " [" .. r.rank .. "]"
-    end
-    return string.format("%5.1f%%  %s", r.score, label)
 end
 
 LrTasks.startAsyncTask(function()
@@ -87,30 +78,35 @@ LrTasks.startAsyncTask(function()
             return
         end
 
-        local lines = {}
-
         -- iNaturalist's per-photo common_ancestor rollups (if any) are
-        -- already folded into `results` by identifyAll/mergeResults, so a
-        -- single scan for the best non-species entry covers both the
+        -- already folded into `results` by identifyAll/mergeResults, so
+        -- preselecting the best non-species entry covers both the
         -- single-photo and multi-photo cases.
+        local defaultIndex = 1
+        local hint = nil
         local bestSpecies = bestMatching(results, true)
         if not bestSpecies or bestSpecies.score < CONFIDENCE_THRESHOLD then
             local bestBroader = bestMatching(results, false)
             if bestBroader then
-                table.insert(lines, "Low confidence at species level -- best broader match:")
-                table.insert(lines, "  " .. formatEntry(bestBroader))
-                table.insert(lines, "")
+                for i, r in ipairs(results) do
+                    if r == bestBroader then
+                        defaultIndex = i
+                        break
+                    end
+                end
+                hint = "Low confidence at species level -- best broader match preselected:"
             end
         end
 
-        for _, r in ipairs(results) do
-            table.insert(lines, formatEntry(r))
-        end
+        local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint)
 
-        LrDialogs.message(
-            "iNaturalist Suggestions",
-            table.concat(lines, "\n"),
-            "info"
-        )
+        if selected then
+            -- Best-effort enrichment: getMajorAncestry degrades to an empty
+            -- list (flat "Species ID > name" tag) on any failure, so this
+            -- never blocks the core tag/title/caption write.
+            local ancestry = INaturalist.getMajorAncestry(selected.id)
+            KeywordWriter.applyIdentification(photos, selected, ancestry)
+            LrDialogs.message("What is This Animal?", "Tagged with: " .. selected.scientificName, "info")
+        end
     end)
 end)
