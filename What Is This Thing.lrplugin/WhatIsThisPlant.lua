@@ -9,10 +9,16 @@ local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
 local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local GpsPrompt = dofile(LrPathUtils.child(_PLUGIN.path, "GpsPrompt.lua"))
 
 -- Below this confidence (%), preselect the best family/genus rollup instead
 -- of the top species guess.
 local CONFIDENCE_THRESHOLD = 85
+
+-- This command expects a handful of photos of the *same* plant from
+-- different angles/organs, not an arbitrary batch -- more than this is
+-- almost always an accidental over-selection.
+local MAX_PHOTOS = 4
 
 local function urlEncode(str)
     return (str:gsub("[^%w%-%.%_%~]", function(c)
@@ -73,6 +79,25 @@ LrTasks.startAsyncTask(function()
 
     if #photos == 0 then
         LrDialogs.message("What is This Plant?", "No photos selected.", "info")
+        return
+    end
+
+    if #photos > MAX_PHOTOS then
+        LrDialogs.message(
+            "What is This Plant?",
+            string.format(
+                "You selected %d photos, but this command expects at most %d -- a few angles of the same plant, not a batch. Select fewer photos and try again.",
+                #photos, MAX_PHOTOS
+            ),
+            "info"
+        )
+        return
+    end
+
+    -- Pl@ntNet doesn't use location at all for identification, but GPS is
+    -- still worth having embedded in the file for when it's later exported
+    -- and uploaded to iNaturalist manually.
+    if not GpsPrompt.ensureGpsOnAllPhotos(photos, "iNaturalist's uploader uses to auto-locate your observation") then
         return
     end
 
@@ -153,7 +178,6 @@ LrTasks.startAsyncTask(function()
             -- name" tag) on any failure, never blocking the core write.
             local ancestry = INaturalist.getMajorAncestryByName(selected.scientificName, selected.rank)
             KeywordWriter.applyIdentification(photos, selected, ancestry)
-            LrDialogs.message("What is This Plant?", "Tagged with: " .. selected.scientificName, "info")
         end
     end)
 end)

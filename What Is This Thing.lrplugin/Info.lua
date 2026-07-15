@@ -13,6 +13,10 @@ return {
             title = "What is This Animal?",
             file = "WhatIsThisAnimal.lua",
         },
+        {
+            title = "Export for iNaturalist",
+            file = "ExportForINaturalist.lua",
+        },
     },
 
     VERSION = { major = 0, minor = 1, revision = 0, build = 0 },

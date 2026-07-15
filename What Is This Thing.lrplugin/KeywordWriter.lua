@@ -35,6 +35,35 @@ local function isDescendantOf(keyword, ancestorKeyword)
     return false
 end
 
+local function findParentKeyword(catalog)
+    for _, kw in ipairs(catalog:getKeywords()) do
+        if kw:getName() == PARENT_KEYWORD_NAME then
+            return kw
+        end
+    end
+    return nil
+end
+
+-- Returns the label (e.g. "Common Name (Scientific Name)") of whichever
+-- keyword `photo` was identified with via applyIdentification (the
+-- attached keyword nested under "Species ID"), or nil if it hasn't been
+-- identified yet. Read-only; does not require a write-access transaction.
+function KeywordWriter.findSpeciesName(photo)
+    local catalog = LrApplication.activeCatalog()
+    local parentKeyword = findParentKeyword(catalog)
+    if not parentKeyword then
+        return nil
+    end
+
+    local currentKeywords = photo:getRawMetadata("keywords") or {}
+    for _, kw in ipairs(currentKeywords) do
+        if isDescendantOf(kw, parentKeyword) then
+            return kw:getName()
+        end
+    end
+    return nil
+end
+
 -- Removes any keyword on `photo` nested anywhere under `parentKeyword`,
 -- other than `exceptKeyword` -- i.e. clears out a previous run's
 -- identification (at whatever rank/depth it was tagged at) before the new
@@ -73,18 +102,22 @@ end
 -- Applies an identification `candidate` ({ scientificName, commonName, ... })
 -- to every photo in `photos`, in one write-access transaction:
 --   - removes any previous "Species ID > ..." keyword from a prior run
---     (at whatever depth it was nested), then adds a keyword named after
---     the bare scientific name -- nested under `ancestry` (a list of
---     { rank, name, commonName }, broadest first, e.g. class/order/family/
---     genus, each labeled "Common Name (Scientific Name)" for browsing;
---     pass an empty list or nil for a flat "Species ID > name" tag) under a
---     shared "Species ID" parent. The leaf keyword is deliberately left as
---     the bare scientific name (not "Common (Scientific)" like its
---     ancestors) so it matches iNaturalist's own taxonomy exactly for
---     later manual import; re-IDing doesn't leave stale species keywords
---     behind regardless of how deep they were,
---   - sets Title to the bare scientific name (iNaturalist's uploader also
---     reads dc:title, so this doubles as a second auto-match signal), and
+--     (at whatever depth it was nested), then adds a keyword labeled
+--     "Common Name (Scientific Name)" (matching every ancestor level) --
+--     nested under `ancestry` (a list of { rank, name, commonName },
+--     broadest first, e.g. class/order/family/genus; pass an empty list or
+--     nil for a flat "Species ID > name" tag) under a shared "Species ID"
+--     parent. The leaf keyword no longer needs to match iNaturalist's exact
+--     taxonomy text the way Title does, since keywords are stripped
+--     entirely before export -- Title alone carries the species guess, so
+--     the keyword tree can consistently favor human-readable labels
+--     instead. Re-IDing doesn't leave stale species keywords behind
+--     regardless of how deep they were (keyword identity for removal is
+--     based on catalog object identity/parent chain, not label text, so
+--     this is unaffected by the label itself changing),
+--   - sets Title to the bare scientific name (iNaturalist's uploader reads
+--     dc:title for its species guess; unlike Keywords this isn't stripped
+--     on export, so it must stay an exact taxonomy match), and
 --   - sets Caption to "Common Name (Scientific Name)" (or just the
 --     scientific name, if no common name is available) for human reading.
 -- Must be called from within an async task; performs a catalog write.
@@ -95,7 +128,7 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     catalog:withWriteAccessDo("Add species identification", function()
         local parentKeyword = catalog:createKeyword(PARENT_KEYWORD_NAME, {}, false, nil, true)
         local branchKeyword = buildAncestryChain(catalog, parentKeyword, ancestry or {})
-        local newKeyword = catalog:createKeyword(candidate.scientificName, {}, true, branchKeyword, true)
+        local newKeyword = catalog:createKeyword(caption, {}, true, branchKeyword, true)
 
         for _, photo in ipairs(photos) do
             local alreadyHasNew = removeOldChildKeywords(photo, parentKeyword, newKeyword)

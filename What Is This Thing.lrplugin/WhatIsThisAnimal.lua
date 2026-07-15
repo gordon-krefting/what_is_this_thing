@@ -8,10 +8,17 @@ local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
 local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local GpsPrompt = dofile(LrPathUtils.child(_PLUGIN.path, "GpsPrompt.lua"))
 
 -- Below this confidence (%), preselect the best non-species entry (already
 -- folded into the merged results) instead of the top species guess.
 local CONFIDENCE_THRESHOLD = 85
+
+-- This command expects a handful of photos of the *same* organism from
+-- different angles, not an arbitrary batch -- more than this is almost
+-- always an accidental over-selection, and would mean that many
+-- sequential iNaturalist API calls.
+local MAX_PHOTOS = 4
 
 local function isSpecies(r)
     return r.rank == nil or r.rank == "species"
@@ -58,6 +65,22 @@ LrTasks.startAsyncTask(function()
         return
     end
 
+    if #photos > MAX_PHOTOS then
+        LrDialogs.message(
+            "What is This Animal?",
+            string.format(
+                "You selected %d photos, but this command expects at most %d -- a few angles of the same animal, not a batch. Select fewer photos and try again.",
+                #photos, MAX_PHOTOS
+            ),
+            "info"
+        )
+        return
+    end
+
+    if not GpsPrompt.ensureGpsOnAllPhotos(photos, "iNaturalist uses for a real accuracy boost") then
+        return
+    end
+
     LrFunctionContext.callWithContext("WhatIsThisAnimalLookup", function(context)
         local progressScope = LrDialogs.showModalProgressDialog {
             title = "What is This Animal?",
@@ -76,19 +99,17 @@ LrTasks.startAsyncTask(function()
 
         local photoPaths = photoPathsOrError
 
-        -- Pair each exported path with its source photo's GPS (if any) so
-        -- iNaturalist's geo-based accuracy boost applies wherever possible.
+        -- Every photo is guaranteed GPS at this point (ensureGpsOnAllPhotos
+        -- either found it already present or just wrote it), so this always
+        -- feeds iNaturalist's geo-based accuracy boost.
         local photoEntries = {}
-        local missingGpsCount = 0
         for i, path in ipairs(photoPaths) do
             local gps = sourcePhotos[i] and sourcePhotos[i]:getRawMetadata("gps")
-            local lat, lng = nil, nil
-            if gps and gps.latitude and gps.longitude then
-                lat, lng = gps.latitude, gps.longitude
-            else
-                missingGpsCount = missingGpsCount + 1
-            end
-            table.insert(photoEntries, { path = path, lat = lat, lng = lng })
+            table.insert(photoEntries, {
+                path = path,
+                lat = gps and gps.latitude,
+                lng = gps and gps.longitude,
+            })
         end
 
         local ok, resultsOrError = LrTasks.pcall(INaturalist.identifyAll, photoEntries, function(i, n)
@@ -114,26 +135,12 @@ LrTasks.startAsyncTask(function()
             return
         end
 
-        local hintLines = {}
-
-        if missingGpsCount > 0 then
-            if #photoPaths == 1 then
-                table.insert(hintLines,
-                    "Note: this photo has no GPS location data -- iNaturalist's location-based accuracy boost won't apply.")
-            else
-                table.insert(hintLines, string.format(
-                    "Note: %d of %d selected photos have no GPS location data -- "
-                        .. "iNaturalist's location-based accuracy boost won't apply for those.",
-                    missingGpsCount, #photoPaths
-                ))
-            end
-        end
-
         -- iNaturalist's per-photo common_ancestor rollups (if any) are
         -- already folded into `results` by identifyAll/mergeResults, so
         -- preselecting the best non-species entry covers both the
         -- single-photo and multi-photo cases.
         local defaultIndex = 1
+        local hint = nil
         local bestSpecies = bestMatching(results, true)
         if not bestSpecies or bestSpecies.score < CONFIDENCE_THRESHOLD then
             local bestBroader = bestMatching(results, false)
@@ -144,11 +151,9 @@ LrTasks.startAsyncTask(function()
                         break
                     end
                 end
-                table.insert(hintLines, "Low confidence at species level -- best broader match preselected:")
+                hint = "Low confidence at species level -- best broader match preselected:"
             end
         end
-
-        local hint = #hintLines > 0 and table.concat(hintLines, "\n") or nil
 
         local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint, linksForCandidate)
 
@@ -158,7 +163,6 @@ LrTasks.startAsyncTask(function()
             -- never blocks the core tag/title/caption write.
             local ancestry = INaturalist.getMajorAncestry(selected.id)
             KeywordWriter.applyIdentification(photos, selected, ancestry)
-            LrDialogs.message("What is This Animal?", "Tagged with: " .. selected.scientificName, "info")
         end
     end)
 end)
