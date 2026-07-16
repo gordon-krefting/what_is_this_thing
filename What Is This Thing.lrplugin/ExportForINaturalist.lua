@@ -131,9 +131,11 @@ LrTasks.startAsyncTask(function()
         return
     end
 
-    -- Every photo must already be identified (via "What is This Plant?" /
-    -- "What is This Animal?") -- abort the whole export rather than
-    -- silently sending some photos with no useful tag at all.
+    -- Normally every photo should already be identified (via "What is This
+    -- Plant?" / "What is This Animal?") -- warn rather than silently
+    -- sending some photos with no useful species tag at all, but let the
+    -- user proceed anyway if that's a deliberate choice (e.g. exporting a
+    -- mixed batch where a few just don't need it).
     local unidentified = {}
     for _, photo in ipairs(photos) do
         if not KeywordWriter.findSpeciesName(photo) then
@@ -142,14 +144,18 @@ LrTasks.startAsyncTask(function()
     end
 
     if #unidentified > 0 then
-        LrDialogs.message(
-            "Export for iNaturalist",
+        local result = LrDialogs.confirm(
+            "Some photos haven't been identified",
             "These photos haven't been identified yet -- run \"What is This Plant?\" or "
-                .. "\"What is This Animal?\" on them first, then try exporting again:\n\n"
+                .. "\"What is This Animal?\" on them first, or export anyway without species "
+                .. "info for them:\n\n"
                 .. table.concat(unidentified, "\n"),
-            "warning"
+            "Export Anyway",
+            "Cancel"
         )
-        return
+        if result ~= "ok" then
+            return
+        end
     end
 
     local destFolder = chooseDestinationFolder()
