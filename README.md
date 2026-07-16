@@ -7,6 +7,13 @@ leaving Lightroom. Built for a personal yard-photography workflow: shoot a
 few angles of an organism, get a species guess, tag it, and later export a
 clean batch for upload to iNaturalist.
 
+It's pretty specific to me and my own workflows. Probably won't really work 
+for, but have a look if you think it would be interesting.
+
+Also, I let Claude Code write pretty much the whole thing. I have to admit,
+I don't know Lua very well, and the Lightroom SDK docs are a little
+idiosyncratic. Claude made this go much faster!
+
 ## Features
 
 - **What is This Plant? / What is This Animal?** -- select up to 4 photos of
@@ -80,7 +87,7 @@ clean batch for upload to iNaturalist.
 - Pl@ntNet's species-page links can occasionally 404 if a species has been
   taxonomically reclassified more recently on their API than on their
   website.
-- After "Update Location from GPX" writes GPS data directly to a file with
+- After "Update Location from GPX" writes GPS data directly to a the image files with
   `exiftool`, Lightroom's own metadata cache doesn't refresh automatically --
   select the affected photos and run **Metadata > Read Metadata from
   Files** afterward.
