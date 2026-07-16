@@ -26,9 +26,13 @@ end
 -- list of { label, url } (or nil/empty for no links); each entry becomes
 -- its own button next to that row, opening the URL in the system browser.
 --
--- Returns the chosen candidate table, or nil if the user canceled.
+-- Returns selected, wantManualEntry:
+--   - a candidate was picked: selected = that candidate, wantManualEntry = false
+--   - "Enter Manually" was clicked: selected = nil, wantManualEntry = true
+--   - canceled: selected = nil, wantManualEntry = false
 function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForCandidate)
     local selected = nil
+    local wantManualEntry = false
 
     LrFunctionContext.callWithContext("CandidatePicker", function(context)
         local props = LrBinding.makePropertyTable(context)
@@ -71,14 +75,17 @@ function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForC
             title = title,
             contents = contents,
             actionVerb = "Tag Photos",
+            otherVerb = "None of These (Enter Manually)",
         }
 
         if result == "ok" then
             selected = candidates[props.selectedIndex]
+        elseif result == "other" then
+            wantManualEntry = true
         end
     end)
 
-    return selected
+    return selected, wantManualEntry
 end
 
 return CandidatePicker

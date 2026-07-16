@@ -10,6 +10,7 @@ local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
 local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local GpsPrompt = dofile(LrPathUtils.child(_PLUGIN.path, "GpsPrompt.lua"))
+local ManualEntry = dofile(LrPathUtils.child(_PLUGIN.path, "ManualEntry.lua"))
 
 -- Below this confidence (%), preselect the best family/genus rollup instead
 -- of the top species guess.
@@ -135,49 +136,61 @@ LrTasks.startAsyncTask(function()
         local genusResults = identifyResultOrError.genusResults
         local familyResults = identifyResultOrError.familyResults
 
+        local selected, ancestry
+
         if #results == 0 then
-            LrDialogs.message("What is This Plant?", "No matches found.", "info")
-            return
-        end
+            -- No automatic match at all -- go straight to manual entry
+            -- rather than just giving up.
+            selected, ancestry = ManualEntry.promptAndResolve()
+        else
+            -- Pl@ntNet's "detailed" rollup always includes these when
+            -- available (unlike iNaturalist's confidence-gated common
+            -- ancestor), so fold the best family/genus entries in as
+            -- selectable candidates too, preselecting family (or genus, if
+            -- no family) when species confidence is low.
+            local candidates = {}
+            local defaultIndex = 1
+            local hint = nil
 
-        -- Pl@ntNet's "detailed" rollup always includes these when available
-        -- (unlike iNaturalist's confidence-gated common ancestor), so fold
-        -- the best family/genus entries in as selectable candidates too,
-        -- preselecting family (or genus, if no family) when species
-        -- confidence is low.
-        local candidates = {}
-        local defaultIndex = 1
-        local hint = nil
-
-        local bestSpecies = results[1]
-        if bestSpecies.score < CONFIDENCE_THRESHOLD then
-            if familyResults[1] then
-                table.insert(candidates, familyResults[1])
-                defaultIndex = #candidates
-                hint = "Low confidence at species level -- best family match preselected:"
-            end
-            if genusResults[1] then
-                table.insert(candidates, genusResults[1])
-                if not hint then
+            local bestSpecies = results[1]
+            if bestSpecies.score < CONFIDENCE_THRESHOLD then
+                if familyResults[1] then
+                    table.insert(candidates, familyResults[1])
                     defaultIndex = #candidates
-                    hint = "Low confidence at species level -- best genus match preselected:"
+                    hint = "Low confidence at species level -- best family match preselected:"
+                end
+                if genusResults[1] then
+                    table.insert(candidates, genusResults[1])
+                    if not hint then
+                        defaultIndex = #candidates
+                        hint = "Low confidence at species level -- best genus match preselected:"
+                    end
                 end
             end
-        end
-        for _, r in ipairs(results) do
-            table.insert(candidates, r)
-        end
+            for _, r in ipairs(results) do
+                table.insert(candidates, r)
+            end
 
-        local selected = CandidatePicker.choose("What is This Plant?", candidates, defaultIndex, hint, linksForCandidate)
+            local wantManualEntry
+            selected, wantManualEntry = CandidatePicker.choose(
+                "What is This Plant?", candidates, defaultIndex, hint, linksForCandidate
+            )
+
+            if wantManualEntry then
+                selected, ancestry = ManualEntry.promptAndResolve()
+            elseif selected then
+                -- Resolve through iNaturalist's taxonomy (by name --
+                -- Pl@ntNet results carry a GBIF id, not an iNat one) so
+                -- plant and animal identifications end up filed under the
+                -- same taxonomic tree. Best-effort: degrades to an empty
+                -- list (flat "Species ID > name" tag) on any failure,
+                -- never blocking the core write.
+                ancestry = INaturalist.getMajorAncestryByName(selected.scientificName, selected.rank)
+            end
+        end
 
         if selected then
-            -- Resolve through iNaturalist's taxonomy (by name -- Pl@ntNet
-            -- results carry a GBIF id, not an iNat one) so plant and animal
-            -- identifications end up filed under the same taxonomic tree.
-            -- Best-effort: degrades to an empty list (flat "Species ID >
-            -- name" tag) on any failure, never blocking the core write.
-            local ancestry = INaturalist.getMajorAncestryByName(selected.scientificName, selected.rank)
-            KeywordWriter.applyIdentification(photos, selected, ancestry)
+            KeywordWriter.applyIdentification(photos, selected, ancestry or {})
         end
     end)
 end)

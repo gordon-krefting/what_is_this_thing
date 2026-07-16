@@ -212,37 +212,36 @@ function INaturalist.identify(photoPath, lat, lng)
     return { results = results, commonAncestor = commonAncestor }
 end
 
--- Fetches the major-rank ancestry (class, order, family, genus -- whichever
--- are present) for an iNaturalist taxon id, ordered from broadest to
--- narrowest. Returns a list of { rank, name, commonName } entries
--- (commonName may be nil), or an empty list if the taxon id is nil or the
--- lookup fails for any reason -- this is an optional enrichment for keyword
--- hierarchy, so a failure here should never block the core tag/title/
--- caption write. No API token needed; this is a public read endpoint.
-function INaturalist.getMajorAncestry(taxonId)
+-- Fetches the full taxon detail record (name, rank, common name, ancestors)
+-- for an iNaturalist taxon id, or nil if the id is nil or the lookup fails
+-- for any reason. No API token needed; this is a public read endpoint.
+-- Shared by getMajorAncestry() and resolveByName() so a taxon id only ever
+-- needs one round trip regardless of which is called.
+local function fetchTaxonDetail(taxonId)
     if not taxonId then
-        return {}
+        return nil
     end
 
     local ok, response, hdrs = LrTasks.pcall(LrHttp.get, TAXA_URL .. tostring(taxonId))
     if not ok then
-        return {}
+        return nil
     end
     local status = hdrs and hdrs.status
     if status ~= 200 then
-        return {}
+        return nil
     end
 
     local decodeOk, decoded = pcall(JSON.decode, response)
     if not decodeOk then
-        return {}
+        return nil
     end
 
-    local taxon = decoded.results and decoded.results[1]
-    if not taxon then
-        return {}
-    end
+    return decoded.results and decoded.results[1]
+end
 
+-- Filters a full taxon record's ancestors down to the major ranks (class,
+-- order, family, genus -- whichever are present), ordered broadest first.
+local function majorAncestryFromTaxon(taxon)
     local ancestry = {}
     for _, a in ipairs(taxon.ancestors or {}) do
         if MAJOR_RANKS[a.rank] then
@@ -250,6 +249,21 @@ function INaturalist.getMajorAncestry(taxonId)
         end
     end
     return ancestry
+end
+
+-- Fetches the major-rank ancestry (class, order, family, genus -- whichever
+-- are present) for an iNaturalist taxon id, ordered from broadest to
+-- narrowest. Returns a list of { rank, name, commonName } entries
+-- (commonName may be nil), or an empty list if the taxon id is nil or the
+-- lookup fails for any reason -- this is an optional enrichment for keyword
+-- hierarchy, so a failure here should never block the core tag/title/
+-- caption write.
+function INaturalist.getMajorAncestry(taxonId)
+    local taxon = fetchTaxonDetail(taxonId)
+    if not taxon then
+        return {}
+    end
+    return majorAncestryFromTaxon(taxon)
 end
 
 local function urlEncode(str)
@@ -301,6 +315,37 @@ end
 function INaturalist.getMajorAncestryByName(scientificName, rank)
     local taxonId = findTaxonId(scientificName, rank)
     return INaturalist.getMajorAncestry(taxonId)
+end
+
+-- Resolves a user-typed scientific name to a full candidate + ancestry, for
+-- the case where neither iNaturalist's nor Pl@ntNet's own identification
+-- found a match but the user already knows what it is. Requires an exact
+-- (case-sensitive) match against iNaturalist's taxonomy, same as
+-- getMajorAncestryByName -- a typo or unrecognized name fails rather than
+-- silently guessing.
+--
+-- Returns candidate, ancestry:
+--   candidate - { id, score, scientificName, commonName, rank }, the same
+--               shape as any other picker candidate (score is a nominal
+--               100, since there's no vision-model confidence to report),
+--               or nil if no exact match was found.
+--   ancestry  - list of { rank, name, commonName }, same shape as
+--               getMajorAncestry's return; {} if candidate is nil.
+function INaturalist.resolveByName(scientificName)
+    local taxonId = findTaxonId(scientificName, nil)
+    local taxon = fetchTaxonDetail(taxonId)
+    if not taxon then
+        return nil, {}
+    end
+
+    local candidate = {
+        id = taxon.id,
+        score = 100,
+        scientificName = taxon.name or scientificName,
+        commonName = taxon.preferred_common_name,
+        rank = taxon.rank,
+    }
+    return candidate, majorAncestryFromTaxon(taxon)
 end
 
 -- Merge key for a taxon entry -- prefer the numeric taxon id (stable across

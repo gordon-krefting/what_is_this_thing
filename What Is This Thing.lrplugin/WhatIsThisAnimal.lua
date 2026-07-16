@@ -9,6 +9,7 @@ local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
 local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local GpsPrompt = dofile(LrPathUtils.child(_PLUGIN.path, "GpsPrompt.lua"))
+local ManualEntry = dofile(LrPathUtils.child(_PLUGIN.path, "ManualEntry.lua"))
 
 -- Below this confidence (%), preselect the best non-species entry (already
 -- folded into the merged results) instead of the top species guess.
@@ -130,39 +131,50 @@ LrTasks.startAsyncTask(function()
 
         local results = resultsOrError
 
-        if #results == 0 then
-            LrDialogs.message("What is This Animal?", "No matches found.", "info")
-            return
-        end
+        local selected, ancestry
 
-        -- iNaturalist's per-photo common_ancestor rollups (if any) are
-        -- already folded into `results` by identifyAll/mergeResults, so
-        -- preselecting the best non-species entry covers both the
-        -- single-photo and multi-photo cases.
-        local defaultIndex = 1
-        local hint = nil
-        local bestSpecies = bestMatching(results, true)
-        if not bestSpecies or bestSpecies.score < CONFIDENCE_THRESHOLD then
-            local bestBroader = bestMatching(results, false)
-            if bestBroader then
-                for i, r in ipairs(results) do
-                    if r == bestBroader then
-                        defaultIndex = i
-                        break
+        if #results == 0 then
+            -- No automatic match at all -- go straight to manual entry
+            -- rather than just giving up.
+            selected, ancestry = ManualEntry.promptAndResolve()
+        else
+            -- iNaturalist's per-photo common_ancestor rollups (if any) are
+            -- already folded into `results` by identifyAll/mergeResults, so
+            -- preselecting the best non-species entry covers both the
+            -- single-photo and multi-photo cases.
+            local defaultIndex = 1
+            local hint = nil
+            local bestSpecies = bestMatching(results, true)
+            if not bestSpecies or bestSpecies.score < CONFIDENCE_THRESHOLD then
+                local bestBroader = bestMatching(results, false)
+                if bestBroader then
+                    for i, r in ipairs(results) do
+                        if r == bestBroader then
+                            defaultIndex = i
+                            break
+                        end
                     end
+                    hint = "Low confidence at species level -- best broader match preselected:"
                 end
-                hint = "Low confidence at species level -- best broader match preselected:"
+            end
+
+            local wantManualEntry
+            selected, wantManualEntry = CandidatePicker.choose(
+                "What is This Animal?", results, defaultIndex, hint, linksForCandidate
+            )
+
+            if wantManualEntry then
+                selected, ancestry = ManualEntry.promptAndResolve()
+            elseif selected then
+                -- Best-effort enrichment: getMajorAncestry degrades to an
+                -- empty list (flat "Species ID > name" tag) on any failure,
+                -- so this never blocks the core tag/title/caption write.
+                ancestry = INaturalist.getMajorAncestry(selected.id)
             end
         end
 
-        local selected = CandidatePicker.choose("What is This Animal?", results, defaultIndex, hint, linksForCandidate)
-
         if selected then
-            -- Best-effort enrichment: getMajorAncestry degrades to an empty
-            -- list (flat "Species ID > name" tag) on any failure, so this
-            -- never blocks the core tag/title/caption write.
-            local ancestry = INaturalist.getMajorAncestry(selected.id)
-            KeywordWriter.applyIdentification(photos, selected, ancestry)
+            KeywordWriter.applyIdentification(photos, selected, ancestry or {})
         end
     end)
 end)
