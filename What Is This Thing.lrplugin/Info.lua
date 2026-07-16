@@ -17,6 +17,10 @@ return {
             title = "Export for iNaturalist",
             file = "ExportForINaturalist.lua",
         },
+        {
+            title = "Update Location from GPX",
+            file = "UpdateLocationFromGpx.lua",
+        },
     },
 
     VERSION = { major = 0, minor = 1, revision = 0, build = 0 },
