@@ -8,7 +8,7 @@ few angles of an organism, get a species guess, tag it, and later export a
 clean batch for upload to iNaturalist.
 
 It's pretty specific to me and my own workflows. Probably won't really work 
-for, but have a look if you think it would be interesting.
+for you, but have a look if you think it would be interesting.
 
 Also, I let Claude Code write pretty much the whole thing. I have to admit,
 I don't know Lua very well, and the Lightroom SDK docs are a little
