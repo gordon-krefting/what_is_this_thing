@@ -6,7 +6,7 @@ local LrDialogs = import 'LrDialogs'
 
 local CandidatePicker = {}
 
-local function formatEntry(r)
+local function formatEntry(r, existingCount)
     local label = r.scientificName
     if r.commonName then
         label = r.commonName .. " (" .. r.scientificName .. ")"
@@ -14,7 +14,11 @@ local function formatEntry(r)
     if r.rank and r.rank ~= "species" then
         label = label .. " [" .. r.rank .. "]"
     end
-    return string.format("%5.1f%%  %s", r.score, label)
+    local text = string.format("%5.1f%%  %s", r.score, label)
+    if existingCount and existingCount > 0 then
+        text = text .. string.format("  [%d photo%s already tagged]", existingCount, existingCount == 1 and "" or "s")
+    end
+    return text
 end
 
 -- Shows a modal dialog listing `candidates` (each a
@@ -26,11 +30,16 @@ end
 -- list of { label, url } (or nil/empty for no links); each entry becomes
 -- its own button next to that row, opening the URL in the system browser.
 --
+-- `countForCandidate`, if given, is called as `countForCandidate(candidate)`
+-- for each row and should return the number of photos already tagged with
+-- that candidate's identification (or nil/0 to show nothing extra) --
+-- appended to the row's label, e.g. "[12 photos already tagged]".
+--
 -- Returns selected, wantManualEntry:
 --   - a candidate was picked: selected = that candidate, wantManualEntry = false
 --   - "Enter Manually" was clicked: selected = nil, wantManualEntry = true
 --   - canceled: selected = nil, wantManualEntry = false
-function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForCandidate)
+function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForCandidate, countForCandidate)
     local selected = nil
     local wantManualEntry = false
 
@@ -46,8 +55,9 @@ function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForC
             f:static_text { title = hint or "Which one is it?" },
         }
         for i, r in ipairs(candidates) do
+            local count = countForCandidate and countForCandidate(r)
             local radio = f:radio_button {
-                title = formatEntry(r),
+                title = formatEntry(r, count),
                 value = LrView.bind("selectedIndex"),
                 checked_value = i,
             }

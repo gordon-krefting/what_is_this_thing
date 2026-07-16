@@ -99,6 +99,51 @@ local function buildAncestryChain(catalog, parentKeyword, ancestry)
     return current
 end
 
+-- Recursively fills `map[name] = keyword` for every keyword nested anywhere
+-- beneath `keyword` (at any depth), keyed by its exact label text.
+local function collectKeywordsByName(keyword, map)
+    for _, child in ipairs(keyword:getChildren()) do
+        map[child:getName()] = child
+        collectKeywordsByName(child, map)
+    end
+end
+
+-- For each entry in `candidates` ({ scientificName, commonName, ... }),
+-- looks up how many photos already carry that exact label as a keyword
+-- somewhere under "Species ID" (at whatever rank/depth it lives at) --
+-- e.g. so a candidate picker dialog can show "already tagged" counts.
+-- Returns a table keyed by the *candidate table itself* (not by index),
+-- mapping to a photo count; entries with no existing keyword or zero
+-- current photos are simply absent from the table.
+--
+-- Read-only: a single traversal of the existing "Species ID" keyword tree,
+-- then one getPhotos() call per candidate that matches -- no write-access
+-- transaction needed, and nothing here creates a keyword just to check it.
+function KeywordWriter.countExistingPhotos(candidates)
+    local catalog = LrApplication.activeCatalog()
+    local parentKeyword = findParentKeyword(catalog)
+    local counts = {}
+    if not parentKeyword then
+        return counts
+    end
+
+    local byName = {}
+    collectKeywordsByName(parentKeyword, byName)
+
+    for _, candidate in ipairs(candidates) do
+        local label = formatLabel(candidate.commonName, candidate.scientificName)
+        local kw = byName[label]
+        if kw then
+            local n = #kw:getPhotos()
+            if n > 0 then
+                counts[candidate] = n
+            end
+        end
+    end
+
+    return counts
+end
+
 -- Applies an identification `candidate` ({ scientificName, commonName, ... })
 -- to every photo in `photos`, in one write-access transaction:
 --   - removes any previous "Species ID > ..." keyword from a prior run

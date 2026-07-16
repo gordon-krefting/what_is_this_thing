@@ -158,9 +158,11 @@ LrTasks.startAsyncTask(function()
                 end
             end
 
+            local existingCounts = KeywordWriter.countExistingPhotos(results)
             local wantManualEntry
             selected, wantManualEntry = CandidatePicker.choose(
-                "What is This Animal?", results, defaultIndex, hint, linksForCandidate
+                "What is This Animal?", results, defaultIndex, hint, linksForCandidate,
+                function(r) return existingCounts[r] end
             )
 
             if wantManualEntry then

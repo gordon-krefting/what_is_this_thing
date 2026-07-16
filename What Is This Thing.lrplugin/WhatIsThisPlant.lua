@@ -171,9 +171,11 @@ LrTasks.startAsyncTask(function()
                 table.insert(candidates, r)
             end
 
+            local existingCounts = KeywordWriter.countExistingPhotos(candidates)
             local wantManualEntry
             selected, wantManualEntry = CandidatePicker.choose(
-                "What is This Plant?", candidates, defaultIndex, hint, linksForCandidate
+                "What is This Plant?", candidates, defaultIndex, hint, linksForCandidate,
+                function(r) return existingCounts[r] end
             )
 
             if wantManualEntry then
