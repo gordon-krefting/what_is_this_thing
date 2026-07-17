@@ -372,7 +372,7 @@ function INaturalist.mergeResults(perPhotoResults)
 
     local pool = {}
 
-    local function addEntry(entry)
+    local function ensurePooled(entry)
         local key = poolKey(entry)
         local pooled = pool[key]
         if not pooled then
@@ -385,18 +385,41 @@ function INaturalist.mergeResults(perPhotoResults)
             }
             pool[key] = pooled
         end
-        pooled.scoreSum = pooled.scoreSum + entry.score
         if not pooled.commonName and entry.commonName then
             pooled.commonName = entry.commonName
         end
+        return pooled
     end
 
     for _, photoResult in ipairs(perPhotoResults) do
+        -- A single photo's own response can list the same taxon both as a
+        -- ranked `results` entry AND as `commonAncestor` -- e.g. when
+        -- several of the top species candidates all share one genus, the
+        -- vision model predicts that genus directly *and* it's also the
+        -- rollup ancestor for the scattered species candidates. Take this
+        -- photo's single best score per taxon before folding into the
+        -- cross-photo pool, so one photo never contributes more than once
+        -- for the same taxon -- otherwise the average can climb past the
+        -- natural ~100% ceiling.
+        local bestThisPhoto = {}
+        local function noteThisPhoto(entry)
+            local key = poolKey(entry)
+            local existing = bestThisPhoto[key]
+            if not existing or entry.score > existing.score then
+                bestThisPhoto[key] = entry
+            end
+        end
+
         for _, r in ipairs(photoResult.results) do
-            addEntry(r)
+            noteThisPhoto(r)
         end
         if photoResult.commonAncestor then
-            addEntry(photoResult.commonAncestor)
+            noteThisPhoto(photoResult.commonAncestor)
+        end
+
+        for _, entry in pairs(bestThisPhoto) do
+            local pooled = ensurePooled(entry)
+            pooled.scoreSum = pooled.scoreSum + entry.score
         end
     end
 
