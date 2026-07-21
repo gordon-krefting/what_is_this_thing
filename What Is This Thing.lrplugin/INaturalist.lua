@@ -17,9 +17,17 @@ local TAXA_URL = "https://api.inaturalist.org/v1/taxa/"
 local TAXA_SEARCH_URL = "https://api.inaturalist.org/v1/taxa"
 
 -- Ranks worth showing as their own level in a keyword hierarchy -- skips
--- kingdom/phylum (near-useless for browsing a personal photo library) and
--- the various sub/infra/super/tribe in-between ranks.
+-- phylum (near-useless for browsing a personal photo library) and the
+-- various sub/infra/super/tribe in-between ranks. Kingdom is handled
+-- separately below.
 local MAJOR_RANKS = { class = true, order = true, family = true, genus = true }
+
+-- Kingdom is skipped everywhere except these -- for animals it's always
+-- Animalia (a photo of any wildlife shares the same kingdom, so it's not a
+-- useful split), but plants and fungi are both plausible subjects for the
+-- "What is This Plant?" command, so showing Kingdom there actually
+-- separates the keyword tree usefully.
+local KINGDOMS_TO_SHOW = { Plantae = true, Fungi = true }
 
 local function promptForToken()
     local token = nil
@@ -239,16 +247,36 @@ local function fetchTaxonDetail(taxonId)
     return decoded.results and decoded.results[1]
 end
 
--- Filters a full taxon record's ancestors down to the major ranks (class,
--- order, family, genus -- whichever are present), ordered broadest first.
-local function majorAncestryFromTaxon(taxon)
+-- Filters a flat list of { rank, name, commonName } ancestor entries down
+-- to the major ranks (class, order, family, genus -- whichever are
+-- present), ordered broadest first. Kingdom is included only for
+-- Plantae/Fungi (see KINGDOMS_TO_SHOW). Shared by majorAncestryFromTaxon
+-- (working from a raw taxon's `ancestors` field) and commonAncestorOf
+-- (working from a manually-sliced ancestor chain), so both stay consistent.
+local function filterMajorRanks(entries)
     local ancestry = {}
-    for _, a in ipairs(taxon.ancestors or {}) do
-        if MAJOR_RANKS[a.rank] then
-            table.insert(ancestry, { rank = a.rank, name = a.name, commonName = a.preferred_common_name })
+    for _, a in ipairs(entries) do
+        if a.rank == "kingdom" then
+            if KINGDOMS_TO_SHOW[a.name] then
+                table.insert(ancestry, { rank = a.rank, name = a.name, commonName = a.commonName })
+            end
+        elseif MAJOR_RANKS[a.rank] then
+            table.insert(ancestry, { rank = a.rank, name = a.name, commonName = a.commonName })
         end
     end
     return ancestry
+end
+
+-- Filters a full taxon record's ancestors down to the major ranks (class,
+-- order, family, genus -- whichever are present), ordered broadest first.
+-- taxon.ancestors is already ordered broadest-first, so kingdom naturally
+-- lands ahead of class without any extra sorting.
+local function majorAncestryFromTaxon(taxon)
+    local entries = {}
+    for _, a in ipairs(taxon.ancestors or {}) do
+        table.insert(entries, { rank = a.rank, name = a.name, commonName = a.preferred_common_name })
+    end
+    return filterMajorRanks(entries)
 end
 
 -- Fetches the major-rank ancestry (class, order, family, genus -- whichever
@@ -317,6 +345,47 @@ function INaturalist.getMajorAncestryByName(scientificName, rank)
     return INaturalist.getMajorAncestry(taxonId)
 end
 
+-- Resolves ancestry for a candidate regardless of which service it came
+-- from -- iNaturalist-sourced candidates carry a real taxon `id` (fast,
+-- direct path via getMajorAncestry); Pl@ntNet-sourced ones don't (falls
+-- back to the name-based lookup below). Needed once a single candidate
+-- picker can show results from either service in the same dialog, since
+-- the selected candidate's origin can no longer be assumed from which
+-- command was launched.
+--
+-- Returns candidate, ancestry -- the candidate is usually the same table
+-- passed in, except for a Pl@ntNet-sourced one: while resolving its
+-- ancestry by name anyway, this also replaces its commonName with
+-- iNaturalist's own preferred_common_name. Pl@ntNet's commonNames[1] is
+-- arbitrary -- its array carries no ordering guarantee (confirmed against
+-- their own docs), which is why the exact same species can come back
+-- labeled "Hoary skullcap" one time and "Downy skullcap" another,
+-- depending on API response order alone. iNaturalist's is a single,
+-- deliberately-curated name instead. Only fetched for the one candidate
+-- the user actually picked, not every row shown in the picker, to avoid
+-- extra API calls for a cosmetic difference that only matters once
+-- something is actually about to be written to a photo.
+function INaturalist.getMajorAncestryForCandidate(candidate)
+    if candidate.id then
+        return candidate, INaturalist.getMajorAncestry(candidate.id)
+    end
+
+    local taxonId = findTaxonId(candidate.scientificName, candidate.rank)
+    local taxon = fetchTaxonDetail(taxonId)
+    if not taxon then
+        return candidate, {}
+    end
+
+    local updatedCandidate = {
+        id = candidate.id,
+        score = candidate.score,
+        scientificName = candidate.scientificName,
+        commonName = taxon.preferred_common_name or candidate.commonName,
+        rank = candidate.rank,
+    }
+    return updatedCandidate, majorAncestryFromTaxon(taxon)
+end
+
 -- Resolves a user-typed scientific name to a full candidate + ancestry, for
 -- the case where neither iNaturalist's nor Pl@ntNet's own identification
 -- found a match but the user already knows what it is. Requires an exact
@@ -346,6 +415,128 @@ function INaturalist.resolveByName(scientificName)
         rank = taxon.rank,
     }
     return candidate, majorAncestryFromTaxon(taxon)
+end
+
+-- Computes the lowest common ancestor of a set of candidates (each needing
+-- a real iNaturalist taxon `id` -- Pl@ntNet-sourced candidates don't have
+-- one and are silently skipped). This is a client-side fallback for when
+-- iNaturalist's own confidence-gated common_ancestor rollup doesn't fire
+-- (e.g. a batch of very scattered, low-confidence genus guesses) -- so the
+-- user can still tag at some rolled-up level instead of guessing wrong.
+--
+-- Fetches each usable candidate's full ancestor chain (one taxon-detail
+-- round trip per candidate -- meant to be called on demand, not on every
+-- identify, to avoid the extra API load/latency on the common case), then
+-- finds the deepest taxon shared by all of them (the longest common prefix
+-- of their ancestor-id lists, which are already ordered broadest-first).
+--
+-- Returns candidate, ancestry (same shapes as resolveByName), or nil, {} if
+-- fewer than 2 candidates have a usable id, or no ancestor is shared at all
+-- (e.g. the candidates span different kingdoms).
+--
+-- The candidate's score is the *sum* of the contributing candidates' own
+-- scores, but only over the ones that aren't themselves an ancestor of
+-- another candidate in the set. Sibling suggestions (e.g. two different
+-- genera in the same family) are mutually exclusive possibilities for what
+-- the organism actually is, so their probabilities add: P(family) =
+-- P(genus A) + P(genus B) + ... If one suggestion is already an ancestor
+-- of another in the set (e.g. a family-level guess alongside one of its
+-- own genera), it's excluded from the sum -- its probability mass already
+-- contains the more specific one, so counting both would double-count the
+-- same possibility, same class of bug as the mergeResults score-inflation
+-- fix. Note this can still occasionally read over 100%: iNaturalist's raw
+-- combined_score isn't a strictly-calibrated probability (it factors in a
+-- geo-based frequency boost too), so summing genuinely disjoint candidates
+-- can nominally exceed 100 -- that reflects the input scores not being true
+-- probabilities, not a bug in this logic.
+function INaturalist.commonAncestorOf(candidates)
+    local chains = {}
+    local scores = {}
+
+    for _, c in ipairs(candidates) do
+        if c.id then
+            local taxon = fetchTaxonDetail(c.id)
+            if taxon then
+                local chain = {}
+                for _, a in ipairs(taxon.ancestors or {}) do
+                    table.insert(chain, { id = a.id, rank = a.rank, name = a.name, commonName = a.preferred_common_name })
+                end
+                table.insert(chain, { id = taxon.id, rank = taxon.rank, name = taxon.name, commonName = taxon.preferred_common_name })
+                table.insert(chains, chain)
+                table.insert(scores, c.score or 0)
+            end
+        end
+    end
+
+    if #chains < 2 then
+        return nil, {}
+    end
+
+    local totalScore = 0
+    for i, chain in ipairs(chains) do
+        local selfId = chain[#chain].id
+        local isAncestorOfAnother = false
+        for j, otherChain in ipairs(chains) do
+            if j ~= i then
+                for k = 1, #otherChain - 1 do
+                    if otherChain[k].id == selfId then
+                        isAncestorOfAnother = true
+                        break
+                    end
+                end
+            end
+            if isAncestorOfAnother then
+                break
+            end
+        end
+        if not isAncestorOfAnother then
+            totalScore = totalScore + scores[i]
+        end
+    end
+
+    local shortestLength = #chains[1]
+    for _, chain in ipairs(chains) do
+        if #chain < shortestLength then
+            shortestLength = #chain
+        end
+    end
+
+    local commonLength = 0
+    for i = 1, shortestLength do
+        local id = chains[1][i].id
+        local allMatch = true
+        for _, chain in ipairs(chains) do
+            if chain[i].id ~= id then
+                allMatch = false
+                break
+            end
+        end
+        if allMatch then
+            commonLength = i
+        else
+            break
+        end
+    end
+
+    if commonLength == 0 then
+        return nil, {}
+    end
+
+    local lca = chains[1][commonLength]
+    local candidate = {
+        id = lca.id,
+        score = totalScore,
+        scientificName = lca.name,
+        commonName = lca.commonName,
+        rank = lca.rank,
+    }
+
+    local ancestryEntries = {}
+    for i = 1, commonLength - 1 do
+        table.insert(ancestryEntries, chains[1][i])
+    end
+
+    return candidate, filterMajorRanks(ancestryEntries)
 end
 
 -- Merge key for a taxon entry -- prefer the numeric taxon id (stable across

@@ -6,12 +6,12 @@ return {
 
     LrExportMenuItems = {
         {
-            title = "What is This Plant?",
-            file = "WhatIsThisPlant.lua",
+            title = "iNaturalist Identification",
+            file = "WhatIsThisAnimal.lua",
         },
         {
-            title = "What is This Animal?",
-            file = "WhatIsThisAnimal.lua",
+            title = "Pl@ntNet Identification",
+            file = "WhatIsThisPlant.lua",
         },
         {
             title = "Export for iNaturalist",

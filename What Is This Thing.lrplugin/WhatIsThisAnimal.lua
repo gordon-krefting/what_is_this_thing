@@ -5,6 +5,7 @@ local LrPathUtils = import 'LrPathUtils'
 local LrFunctionContext = import 'LrFunctionContext'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
+local PlantNet = dofile(LrPathUtils.child(_PLUGIN.path, "PlantNet.lua"))
 local ExportTemp = dofile(LrPathUtils.child(_PLUGIN.path, "ExportTemp.lua"))
 local CandidatePicker = dofile(LrPathUtils.child(_PLUGIN.path, "CandidatePicker.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
@@ -62,13 +63,13 @@ LrTasks.startAsyncTask(function()
     local photos = catalog:getTargetPhotos()
 
     if #photos == 0 then
-        LrDialogs.message("What is This Animal?", "No photos selected.", "info")
+        LrDialogs.message("iNaturalist Identification", "No photos selected.", "info")
         return
     end
 
     if #photos > MAX_PHOTOS then
         LrDialogs.message(
-            "What is This Animal?",
+            "iNaturalist Identification",
             string.format(
                 "You selected %d photos, but this command expects at most %d -- a few angles of the same animal, not a batch. Select fewer photos and try again.",
                 #photos, MAX_PHOTOS
@@ -84,7 +85,7 @@ LrTasks.startAsyncTask(function()
 
     LrFunctionContext.callWithContext("WhatIsThisAnimalLookup", function(context)
         local progressScope = LrDialogs.showModalProgressDialog {
-            title = "What is This Animal?",
+            title = "iNaturalist Identification",
             caption = "Exporting photos...",
             cannotCancel = true,
             functionContext = context,
@@ -94,7 +95,7 @@ LrTasks.startAsyncTask(function()
 
         if not exportOk then
             progressScope:done()
-            LrDialogs.message("What is This Animal?", "Export failed: " .. tostring(photoPathsOrError), "critical")
+            LrDialogs.message("iNaturalist Identification", "Export failed: " .. tostring(photoPathsOrError), "critical")
             return
         end
 
@@ -121,11 +122,11 @@ LrTasks.startAsyncTask(function()
             end
         end)
 
-        ExportTemp.cleanup(tempDir)
         progressScope:done()
 
         if not ok then
-            LrDialogs.message("What is This Animal?", "Lookup failed: " .. tostring(resultsOrError), "critical")
+            ExportTemp.cleanup(tempDir)
+            LrDialogs.message("iNaturalist Identification", "Lookup failed: " .. tostring(resultsOrError), "critical")
             return
         end
 
@@ -158,22 +159,85 @@ LrTasks.startAsyncTask(function()
                 end
             end
 
-            local existingCounts = KeywordWriter.countExistingPhotos(results)
-            local wantManualEntry
-            selected, wantManualEntry = CandidatePicker.choose(
-                "What is This Animal?", results, defaultIndex, hint, linksForCandidate,
-                function(r) return existingCounts[r] end
-            )
+            -- currentCandidates/sectionLabelForIndex/offerOtherService can
+            -- all change after one pass through the loop below, if the user
+            -- asks to also try Pl@ntNet -- see the loop comment.
+            local currentCandidates = results
+            local sectionLabelForIndex = nil
+            local offerOtherService = "Also try Pl@ntNet"
+            local wantManualEntry, wantOtherService
+
+            -- Runs at most twice: once with just iNaturalist's own results,
+            -- and again with Pl@ntNet's folded in as a second labeled
+            -- section if the user asks for it (offerOtherService is cleared
+            -- either way after that, so this can't loop a third time).
+            -- Candidates from the two services are shown side by side, not
+            -- merged/deduped -- see CandidatePicker.choose's doc comment.
+            repeat
+                local existingCounts = KeywordWriter.countExistingPhotos(currentCandidates)
+                selected, wantManualEntry, wantOtherService = CandidatePicker.choose(
+                    "iNaturalist Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
+                    function(r) return existingCounts[r] end,
+                    function() return INaturalist.commonAncestorOf(currentCandidates) end,
+                    offerOtherService,
+                    sectionLabelForIndex
+                )
+
+                if wantOtherService then
+                    offerOtherService = nil -- only one other service to try
+
+                    LrFunctionContext.callWithContext("TryPlantNet", function(innerContext)
+                        local plantNetProgress = LrDialogs.showModalProgressDialog {
+                            title = "iNaturalist Identification",
+                            caption = "Trying Pl@ntNet...",
+                            cannotCancel = true,
+                            functionContext = innerContext,
+                        }
+                        local plantNetOk, plantNetResultOrError = LrTasks.pcall(PlantNet.identify, photoPaths)
+                        plantNetProgress:done()
+
+                        if plantNetOk then
+                            local originalCount = #currentCandidates
+                            local combined = {}
+                            for _, r in ipairs(currentCandidates) do
+                                table.insert(combined, r)
+                            end
+                            for _, r in ipairs(plantNetResultOrError.results) do
+                                table.insert(combined, r)
+                            end
+                            currentCandidates = combined
+                            sectionLabelForIndex = function(i)
+                                if i == 1 then return "iNaturalist" end
+                                if i == originalCount + 1 then return "Pl@ntNet" end
+                                return nil
+                            end
+                        else
+                            LrDialogs.message(
+                                "iNaturalist Identification",
+                                "Pl@ntNet lookup failed: " .. tostring(plantNetResultOrError),
+                                "critical"
+                            )
+                        end
+                    end)
+                end
+            until not wantOtherService
 
             if wantManualEntry then
                 selected, ancestry = ManualEntry.promptAndResolve()
             elseif selected then
-                -- Best-effort enrichment: getMajorAncestry degrades to an
-                -- empty list (flat "Species ID > name" tag) on any failure,
-                -- so this never blocks the core tag/title/caption write.
-                ancestry = INaturalist.getMajorAncestry(selected.id)
+                -- Best-effort enrichment: degrades to an empty list (flat
+                -- "Species ID > name" tag) on any failure, so this never
+                -- blocks the core tag/title/caption write. Uses the
+                -- id-or-name dispatch since `selected` might now be a
+                -- Pl@ntNet-sourced candidate with no id.
+                selected, ancestry = INaturalist.getMajorAncestryForCandidate(selected)
             end
         end
+
+        -- Only safe to clean up now -- the "Also try Pl@ntNet" path above
+        -- needs these same temp JPEGs to still exist, since it reuses them
+        -- rather than re-exporting.
+        ExportTemp.cleanup(tempDir)
 
         if selected then
             KeywordWriter.applyIdentification(photos, selected, ancestry or {})

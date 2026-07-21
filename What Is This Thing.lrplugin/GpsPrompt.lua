@@ -21,20 +21,60 @@ local function storeHomeLocation(lat, lng)
     prefs.homeLng = lng
 end
 
--- Parses "latitude, longitude" (comma-separated, optional surrounding
--- whitespace) into two numbers. Returns nil if the string doesn't match,
--- isn't numeric, or falls outside valid lat/lng ranges (catches e.g. the
--- two values being swapped).
+-- Smart/curly quotes -> straight quotes, so DMS input copied from
+-- somewhere that auto-corrects punctuation (Notes, Messages, etc.) still
+-- parses. Done as literal substring replacement rather than folding these
+-- into a %[...%] character class -- Lua patterns match byte-by-byte, not
+-- by Unicode codepoint, so a class containing multi-byte UTF-8 characters
+-- can match stray bytes from within them instead of the whole character.
+local function normalizeQuotes(str)
+    str = str:gsub("’", "'"):gsub("‘", "'")
+    str = str:gsub("”", '"'):gsub("“", '"')
+    return str
+end
+
+local function dmsToDecimal(deg, min, sec, dir)
+    local value = deg + min / 60 + sec / 3600
+    dir = dir:upper()
+    if dir == "S" or dir == "W" then
+        value = -value
+    end
+    return value
+end
+
+-- Tries a few formats, in order, and returns the first that parses:
+--   1. Decimal "latitude, longitude" (the original format, e.g.
+--      "41.303145, -74.239233").
+--   2. Decimal "latitude longitude" with just whitespace, no comma.
+--   3. DMS with cardinal directions, e.g. the format iOS shares locations
+--      in: 49°19'27.35" S 72°53'35.59" W (comma between the two halves is
+--      optional; whitespace around the direction letter is optional too,
+--      since some sources omit it).
+-- Returns nil if nothing matches, isn't numeric, or falls outside valid
+-- lat/lng ranges (catches e.g. the two values being swapped).
 local function parseCoordinates(str)
     if not str then
         return nil
     end
+    str = normalizeQuotes(str)
+
+    local lat, lng
+
     local latStr, lngStr = str:match("^%s*(-?%d+%.?%d*)%s*,%s*(-?%d+%.?%d*)%s*$")
     if not latStr then
-        return nil
+        latStr, lngStr = str:match("^%s*(-?%d+%.?%d*)%s+(-?%d+%.?%d*)%s*$")
     end
-    local lat = tonumber(latStr)
-    local lng = tonumber(lngStr)
+    if latStr then
+        lat, lng = tonumber(latStr), tonumber(lngStr)
+    else
+        local latDeg, latMin, latSec, latDir, lngDeg, lngMin, lngSec, lngDir =
+            str:match('^%s*(%d+)°(%d+)\'([%d%.]+)"%s*([NSns])%s*,?%s*(%d+)°(%d+)\'([%d%.]+)"%s*([EWew])%s*$')
+        if latDeg then
+            lat = dmsToDecimal(tonumber(latDeg), tonumber(latMin), tonumber(latSec), latDir)
+            lng = dmsToDecimal(tonumber(lngDeg), tonumber(lngMin), tonumber(lngSec), lngDir)
+        end
+    end
+
     if not lat or not lng then
         return nil
     end
@@ -76,7 +116,7 @@ function GpsPrompt.choose(promptText)
             table.insert(args, f:static_text { title = promptText })
             table.insert(args, f:edit_field {
                 value = LrView.bind("coordinatesText"),
-                placeholder_string = "e.g. 41.303145, -74.239233",
+                placeholder_string = "e.g. 41.303145, -74.239233 or 41°18'11\" N 74°14'21\" W",
                 width_in_chars = 30,
             })
             table.insert(args, f:checkbox {
@@ -120,7 +160,7 @@ function GpsPrompt.choose(promptText)
             return resultLat, resultLng
         end
         if parseFailed then
-            errorText = "Couldn't read that as \"latitude, longitude\" -- try again, or Cancel."
+            errorText = "Couldn't read that as coordinates (decimal \"latitude, longitude\" or DMS like 41°18'11\" N 74°14'21\" W) -- try again, or Cancel."
         end
     end
 end
