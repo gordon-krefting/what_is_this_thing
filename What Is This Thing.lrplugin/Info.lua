@@ -4,6 +4,8 @@ return {
     LrToolkitIdentifier = 'org.krefting.whatisthisthing',
     LrPluginName = "What is this Thing?",
 
+    LrMetadataProvider = "MetadataDefinition.lua",
+
     LrExportMenuItems = {
         {
             title = "iNaturalist Identification",
@@ -20,6 +22,14 @@ return {
         {
             title = "Update Location from GPX",
             file = "UpdateLocationFromGpx.lua",
+        },
+        {
+            title = "Set Cultivar",
+            file = "SetCultivar.lua",
+        },
+        {
+            title = "Edit Taxon Info",
+            file = "EditTaxonInfo.lua",
         },
     },
 

@@ -377,11 +377,24 @@ function INaturalist.getMajorAncestryForCandidate(candidate)
     end
 
     local updatedCandidate = {
-        id = candidate.id,
+        -- The whole point of this branch is that candidate.id is nil
+        -- (Pl@ntNet never provides one) -- use the id we just resolved via
+        -- name lookup instead. Without this, candidate.id stays nil
+        -- downstream, which silently skips getTaxonFacts entirely (its
+        -- caller in KeywordWriter.applyIdentification only fetches when
+        -- candidate.id is truthy) -- found via a real report of
+        -- Establishment Means never populating for Pl@ntNet-identified
+        -- plants.
+        id = taxon.id,
         score = candidate.score,
         scientificName = candidate.scientificName,
         commonName = taxon.preferred_common_name or candidate.commonName,
-        rank = candidate.rank,
+        -- Prefer the freshly-resolved iNat taxon's own rank over Pl@ntNet's
+        -- (which is often nil for species-level results -- see isSpecies()
+        -- in WhatIsThisAnimal.lua), for the same reason commonName prefers
+        -- iNat: consistency with the source of truth now that we're
+        -- resolving through it anyway.
+        rank = taxon.rank or candidate.rank,
     }
     return updatedCandidate, majorAncestryFromTaxon(taxon)
 end
@@ -643,6 +656,118 @@ function INaturalist.identifyAll(photoEntries, onProgress)
         table.insert(perPhoto, INaturalist.identify(entry.path, entry.lat, entry.lng))
     end
     return INaturalist.mergeResults(perPhoto)
+end
+
+-- iNaturalist's place id for New York state, confirmed live (2026-07-22)
+-- via /v1/places/autocomplete?q=New York (id 48, place_type 8, admin_level
+-- 10 -- the state itself, distinct from the city and county entries also
+-- named "New York"). Hardcoded rather than resolved per-photo: tried
+-- resolving an arbitrary GPS point to its containing place via
+-- /v1/places/nearby with a properly-sized bounding box and it only ever
+-- returned "North America", nothing state/country-specific, regardless of
+-- box size -- not a reliable mechanism. Given this plugin's actual use is
+-- overwhelmingly local, one fixed known-good place id is simpler and
+-- actually works.
+local HOME_PLACE_ID = 48
+local HOME_RADIUS_MILES = 50
+
+local function getHomeLocation()
+    local prefs = LrPrefs.prefsForPlugin()
+    if prefs.homeLat and prefs.homeLng then
+        return prefs.homeLat, prefs.homeLng
+    end
+    return nil
+end
+
+-- Great-circle distance in miles between two lat/lng points (haversine).
+local function milesBetween(lat1, lng1, lat2, lng2)
+    local earthRadiusMiles = 3958.8
+    local function toRadians(deg) return deg * math.pi / 180 end
+    local dLat = toRadians(lat2 - lat1)
+    local dLng = toRadians(lng2 - lng1)
+    local a = math.sin(dLat / 2) ^ 2 + math.cos(toRadians(lat1)) * math.cos(toRadians(lat2)) * math.sin(dLng / 2) ^ 2
+    local c = 2 * math.atan(math.sqrt(a), math.sqrt(1 - a))
+    return earthRadiusMiles * c
+end
+
+-- Picks a representative conservation status out of a taxon's
+-- conservation_statuses array. There's no single "global" entry to rely
+-- on -- confirmed live against a real taxon with 16 assessments (France,
+-- Finland, several US states, the actual IUCN Red List, etc.), each with
+-- its own `authority` and `place`, and the taxon's own singular
+-- `conservation_status` field stays null unless there happens to be an
+-- exact match for whatever preferred_place_id was requested. Rather than
+-- try to fully replicate iNat's own resolution logic, this takes the first
+-- entry whose authority mentions IUCN as a reasonable "widely recognized
+-- status" heuristic -- not a claim of full accuracy for any specific
+-- place, just good enough for casual reference. Returns nil if no such
+-- entry exists (common -- many species only have regional/national
+-- listings, no global IUCN assessment at all).
+local function pickConservationStatus(taxon)
+    for _, entry in ipairs(taxon.conservation_statuses or {}) do
+        if entry.authority and entry.authority:lower():find("iucn", 1, true) then
+            return entry.status
+        end
+    end
+    return nil
+end
+
+-- Fetches the taxon-level facts cached in TaxonStore.lua (Conservation
+-- Status, Establishment Means, Wikipedia URL) in a single round trip.
+-- `lat`/`lng` (the photo's own GPS) are optional; Establishment Means is
+-- only resolved when they're within HOME_RADIUS_MILES of the user's
+-- stored home location (see GpsPrompt.lua) -- iNat's establishment_means
+-- is inherently place-specific, and there's no reliable way to resolve an
+-- arbitrary GPS point to the right iNat place (confirmed live: even a
+-- correctly-sized bounding box around a real point only ever returned
+-- "North America" from /v1/places/nearby, never anything as specific as a
+-- state) -- so this only ever asks about one fixed, known-good place
+-- (HOME_PLACE_ID) and only when there's a reasonable chance it's the
+-- right context. Conservation Status and Wikipedia URL aren't
+-- place-gated -- they come along for free in the same request regardless.
+--
+-- Returns a table (possibly with some/all fields nil) -- never errors,
+-- since this is an optional enrichment. Always fetches fresh from the
+-- API; TaxonStore-level caching (so this isn't re-fetched for a species
+-- already looked up before) is the caller's responsibility.
+function INaturalist.getTaxonFacts(taxonId, lat, lng)
+    if not taxonId then
+        return {}
+    end
+
+    local url = TAXA_URL .. tostring(taxonId) .. "?preferred_place_id=" .. tostring(HOME_PLACE_ID)
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
+    if not ok then
+        return {}
+    end
+    local status = hdrs and hdrs.status
+    if status ~= 200 then
+        return {}
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk then
+        return {}
+    end
+
+    local taxon = decoded.results and decoded.results[1]
+    if not taxon then
+        return {}
+    end
+
+    local establishmentMeans = nil
+    if lat and lng then
+        local homeLat, homeLng = getHomeLocation()
+        if homeLat and milesBetween(lat, lng, homeLat, homeLng) <= HOME_RADIUS_MILES then
+            establishmentMeans = taxon.preferred_establishment_means
+        end
+    end
+
+    return {
+        conservationStatus = pickConservationStatus(taxon),
+        establishmentMeans = establishmentMeans,
+        wikipediaUrl = taxon.wikipedia_url,
+    }
 end
 
 return INaturalist

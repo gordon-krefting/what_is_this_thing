@@ -1,6 +1,15 @@
 local LrApplication = import 'LrApplication'
+local LrPathUtils = import 'LrPathUtils'
+
+local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
+local TaxonStore = dofile(LrPathUtils.child(_PLUGIN.path, "TaxonStore.lua"))
 
 local KeywordWriter = {}
+
+-- Fields written per photo whenever a taxon-level entry (fetched or cached
+-- via TaxonStore) is available. Kept as a list rather than five separate
+-- if-blocks so it's one place to update if a field gets added/removed.
+local TAXON_LEVEL_FIELDS = { "conservationStatus", "establishmentMeans", "growthHabit", "wikipediaUrl", "notes" }
 
 -- All species-ID keywords are nested under this parent (not itself included
 -- on export) so a re-ID can reliably find and remove the *old* leaf keyword
@@ -39,6 +48,33 @@ local function findParentKeyword(catalog)
     for _, kw in ipairs(catalog:getKeywords()) do
         if kw:getName() == PARENT_KEYWORD_NAME then
             return kw
+        end
+    end
+    return nil
+end
+
+-- Generates a UUID v4 (Lightroom's SDK has no built-in generator). Used for
+-- the "Observation ID" custom field -- a purely local id shared by every
+-- photo identified together in one batch, so they can be found again later
+-- (e.g. to correct or annotate the identification) without having to
+-- remember/reselect the original photos.
+local function generateUUID()
+    local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+    return (template:gsub("[xy]", function(c)
+        local v = (c == "x") and math.random(0, 15) or math.random(8, 11)
+        return string.format("%x", v)
+    end))
+end
+
+-- Returns the Observation ID already on any photo in `photos`, or nil if
+-- none of them have one yet -- so re-identifying an existing batch (or
+-- adding a straggler photo to it) reuses the same id instead of forking a
+-- new group.
+local function findExistingObservationId(photos)
+    for _, photo in ipairs(photos) do
+        local id = photo:getPropertyForPlugin(_PLUGIN, "observationId")
+        if id then
+            return id
         end
     end
     return nil
@@ -164,11 +200,41 @@ end
 --     dc:title for its species guess; unlike Keywords this isn't stripped
 --     on export, so it must stay an exact taxonomy match), and
 --   - sets Caption to "Common Name (Scientific Name)" (or just the
---     scientific name, if no common name is available) for human reading.
+--     scientific name, if no common name is available) for human reading,
+--   - sets the custom metadata fields (Scientific Name, Common Name, Taxon
+--     Rank, ID Confidence, Observation ID) declared in
+--     MetadataDefinition.lua, so identifications are searchable/filterable
+--     as real structured data, not just free text,
+--   - and sets the taxon-level fields (Conservation Status, Establishment
+--     Means, Growth Habit, Wikipedia, Notes) from TaxonStore.lua's local
+--     cache -- fetching fresh from iNaturalist only the first time this
+--     species is encountered (TaxonStore.get() returns a non-nil, even if
+--     empty, table for anything already checked, so a species with no
+--     notable data doesn't get re-fetched every time either). Growth
+--     Habit/Notes are manual-only (see EditTaxonInfo.lua) but flow through
+--     the same cache, so a species already annotated automatically carries
+--     that forward onto newly-identified photos of it too.
 -- Must be called from within an async task; performs a catalog write.
 function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     local catalog = LrApplication.activeCatalog()
     local caption = formatCaption(candidate)
+    -- Nil rank means species by this codebase's established convention
+    -- (see isSpecies() in WhatIsThisAnimal.lua / linksForCandidate() in
+    -- WhatIsThisPlant.lua) -- normalize it here rather than storing an
+    -- ambiguous-looking blank/"(unknown)" value for the common case.
+    local rankValue = candidate.rank or "species"
+    local observationId = findExistingObservationId(photos) or generateUUID()
+
+    -- Network call (inside getTaxonFacts) -- must happen before the write
+    -- transaction starts, not inside it.
+    local taxonEntry = TaxonStore.get(candidate.scientificName)
+    if not taxonEntry and candidate.id then
+        local gps = photos[1] and photos[1]:getRawMetadata("gps")
+        local lat = gps and gps.latitude
+        local lng = gps and gps.longitude
+        local facts = INaturalist.getTaxonFacts(candidate.id, lat, lng)
+        taxonEntry = TaxonStore.set(candidate.scientificName, facts)
+    end
 
     catalog:withWriteAccessDo("Add species identification", function()
         local parentKeyword = catalog:createKeyword(PARENT_KEYWORD_NAME, {}, false, nil, true)
@@ -182,6 +248,22 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
             end
             photo:setRawMetadata("title", candidate.scientificName)
             photo:setRawMetadata("caption", caption)
+
+            photo:setPropertyForPlugin(_PLUGIN, "scientificName", candidate.scientificName)
+            photo:setPropertyForPlugin(_PLUGIN, "commonName", candidate.commonName)
+            photo:setPropertyForPlugin(_PLUGIN, "taxonRank", rankValue)
+            if candidate.score then
+                photo:setPropertyForPlugin(_PLUGIN, "idConfidence", string.format("%.1f%%", candidate.score))
+            end
+            photo:setPropertyForPlugin(_PLUGIN, "observationId", observationId)
+
+            if taxonEntry then
+                for _, field in ipairs(TAXON_LEVEL_FIELDS) do
+                    if taxonEntry[field] then
+                        photo:setPropertyForPlugin(_PLUGIN, field, taxonEntry[field])
+                    end
+                end
+            end
         end
     end)
 end
