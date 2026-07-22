@@ -4,10 +4,32 @@ local LrBinding = import 'LrBinding'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
 local LrPathUtils = import 'LrPathUtils'
+local LrPrefs = import 'LrPrefs'
 
 local HomeLocation = dofile(LrPathUtils.child(_PLUGIN.path, "HomeLocation.lua"))
 
 local GpsPrompt = {}
+
+-- Remembers the last hand-typed coordinates (and their approximate-location
+-- checkbox state) across invocations, so a run of photos from the same
+-- outing/location doesn't require retyping the same coordinates every time
+-- -- offered as its own "Use Most Recent" button, distinct from the fixed
+-- "Use Home" one. Deliberately NOT updated when "Use Home" is chosen (that
+-- path already has its own dedicated button) or when nothing is submitted.
+local function getRecentEntry()
+    local prefs = LrPrefs.prefsForPlugin()
+    if prefs.recentLat and prefs.recentLng then
+        return prefs.recentLat, prefs.recentLng, prefs.recentApproximate
+    end
+    return nil
+end
+
+local function storeRecentEntry(lat, lng, isApproximate)
+    local prefs = LrPrefs.prefsForPlugin()
+    prefs.recentLat = lat
+    prefs.recentLng = lng
+    prefs.recentApproximate = isApproximate
+end
 
 -- Smart/curly quotes -> straight quotes, so DMS input copied from
 -- somewhere that auto-corrects punctuation (Notes, Messages, etc.) still
@@ -72,10 +94,12 @@ local function parseCoordinates(str)
     return lat, lng
 end
 
--- Prompts for coordinates to use when photo(s) have no GPS data, offering
--- two choices: use the fixed home location, or type coordinates in as
--- "latitude, longitude" (or DMS) -- plus Cancel. Reprompts (with an error)
--- on unparseable input rather than treating a typo as a cancel.
+-- Prompts for coordinates to use when photo(s) have no GPS data, offering:
+-- the fixed home location, the last hand-typed coordinates (if any --
+-- "Use Most Recent", handy for a run of photos from the same outing), or
+-- typing coordinates in as "latitude, longitude" (or DMS) -- plus Cancel.
+-- Reprompts (with an error) on unparseable input rather than treating a
+-- typo as a cancel.
 --
 -- Returns lat, lng, isApproximate, or nil, nil, nil if the user canceled.
 -- isApproximate reflects the "This is an approximate location" checkbox
@@ -86,6 +110,7 @@ end
 -- flag, and not a per-instance judgment call the way typed coordinates are).
 function GpsPrompt.choose(promptText)
     local errorText = nil
+    local recentLat, recentLng, recentApproximate = getRecentEntry()
 
     while true do
         local resultLat, resultLng, resultApproximate, canceled, parseFailed
@@ -115,6 +140,21 @@ function GpsPrompt.choose(promptText)
                 value = LrView.bind("isApproximate"),
             })
 
+            if recentLat and recentLng then
+                local recentButton
+                local label = string.format("Use Most Recent (%.4f, %.4f)", recentLat, recentLng)
+                if recentApproximate then
+                    label = label .. " [approx]"
+                end
+                recentButton = f:push_button {
+                    title = label,
+                    action = function()
+                        LrDialogs.stopModalWithResult(recentButton, "recent")
+                    end,
+                }
+                table.insert(args, recentButton)
+            end
+
             local dialogArgs = {
                 title = "No GPS Data",
                 contents = f:column(args),
@@ -127,10 +167,13 @@ function GpsPrompt.choose(promptText)
 
             if result == "other" then
                 resultLat, resultLng, resultApproximate = HomeLocation.lat, HomeLocation.lng, false
+            elseif result == "recent" then
+                resultLat, resultLng, resultApproximate = recentLat, recentLng, recentApproximate
             elseif result == "ok" then
                 local lat, lng = parseCoordinates(props.coordinatesText)
                 if lat then
                     resultLat, resultLng, resultApproximate = lat, lng, props.isApproximate
+                    storeRecentEntry(lat, lng, props.isApproximate)
                 else
                     parseFailed = true
                 end
