@@ -84,6 +84,30 @@ return {
             browsable = true,
         },
         {
+            id = "approximateLocation",
+            title = "Approximate Location",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Set automatically whenever GpsPrompt.lua fills in missing GPS
+            -- via hand-typed coordinates (per the user, usually a memory/
+            -- Google Maps guess, not precise) -- NOT set for the "Use Home"
+            -- fallback, which is accurate to within ~100 yards and treated
+            -- as close enough not to need flagging. User-editable afterward
+            -- in the Metadata panel (e.g. to clear it once they've confirmed
+            -- an exact location some other way). The `nil` entry must be
+            -- declared explicitly, or the panel's dropdown has nothing to
+            -- switch back to once "Yes" is set -- confirmed live: with only
+            -- "yes" declared, there was no way to un-flag a photo from the
+            -- panel at all. Inverse of the Taxon Rank lesson (there, an
+            -- undeclared *non-nil* value rendered blank); here it's the
+            -- reverse -- nil itself needs to be a selectable choice.
+            values = {
+                { value = nil, title = "No" },
+                { value = "yes", title = "Yes" },
+            },
+        },
+        {
             id = "observationId",
             title = "Observation ID",
             dataType = "string",

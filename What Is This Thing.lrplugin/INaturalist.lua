@@ -9,6 +9,7 @@ local LrDialogs = import 'LrDialogs'
 local LrTasks = import 'LrTasks'
 
 local JSON = dofile(LrPathUtils.child(_PLUGIN.path, "JSON.lua"))
+local HomeLocation = dofile(LrPathUtils.child(_PLUGIN.path, "HomeLocation.lua"))
 
 local INaturalist = {}
 
@@ -672,11 +673,7 @@ local HOME_PLACE_ID = 48
 local HOME_RADIUS_MILES = 50
 
 local function getHomeLocation()
-    local prefs = LrPrefs.prefsForPlugin()
-    if prefs.homeLat and prefs.homeLng then
-        return prefs.homeLat, prefs.homeLng
-    end
-    return nil
+    return HomeLocation.lat, HomeLocation.lng
 end
 
 -- Great-circle distance in miles between two lat/lng points (haversine).
@@ -715,8 +712,8 @@ end
 -- Fetches the taxon-level facts cached in TaxonStore.lua (Conservation
 -- Status, Establishment Means, Wikipedia URL) in a single round trip.
 -- `lat`/`lng` (the photo's own GPS) are optional; Establishment Means is
--- only resolved when they're within HOME_RADIUS_MILES of the user's
--- stored home location (see GpsPrompt.lua) -- iNat's establishment_means
+-- only resolved when they're within HOME_RADIUS_MILES of the fixed home
+-- location (see HomeLocation.lua) -- iNat's establishment_means
 -- is inherently place-specific, and there's no reliable way to resolve an
 -- arbitrary GPS point to the right iNat place (confirmed live: even a
 -- correctly-sized bounding box around a real point only ever returned

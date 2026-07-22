@@ -1,25 +1,13 @@
 local LrApplication = import 'LrApplication'
-local LrPrefs = import 'LrPrefs'
 local LrView = import 'LrView'
 local LrBinding = import 'LrBinding'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
+local LrPathUtils = import 'LrPathUtils'
+
+local HomeLocation = dofile(LrPathUtils.child(_PLUGIN.path, "HomeLocation.lua"))
 
 local GpsPrompt = {}
-
-local function getHomeLocation()
-    local prefs = LrPrefs.prefsForPlugin()
-    if prefs.homeLat and prefs.homeLng then
-        return prefs.homeLat, prefs.homeLng
-    end
-    return nil
-end
-
-local function storeHomeLocation(lat, lng)
-    local prefs = LrPrefs.prefsForPlugin()
-    prefs.homeLat = lat
-    prefs.homeLng = lng
-end
 
 -- Smart/curly quotes -> straight quotes, so DMS input copied from
 -- somewhere that auto-corrects punctuation (Notes, Messages, etc.) still
@@ -85,24 +73,27 @@ local function parseCoordinates(str)
 end
 
 -- Prompts for coordinates to use when photo(s) have no GPS data, offering
--- up to three choices: use a saved home location (only shown if one is
--- already stored), type coordinates in as "latitude, longitude" (with an
--- option to save them as the new home location), or cancel entirely.
--- Reprompts (with an error) on unparseable input rather than treating a
--- typo as a cancel.
+-- two choices: use the fixed home location, or type coordinates in as
+-- "latitude, longitude" (or DMS) -- plus Cancel. Reprompts (with an error)
+-- on unparseable input rather than treating a typo as a cancel.
 --
--- Returns lat, lng, or nil, nil if the user canceled.
+-- Returns lat, lng, isApproximate, or nil, nil, nil if the user canceled.
+-- isApproximate reflects the "This is an approximate location" checkbox
+-- (only shown/relevant for hand-typed coordinates -- per the user, usually
+-- a memory/Google Maps guess, so it defaults checked, but sometimes it's an
+-- exact reading and they want to uncheck it) and is always false for the
+-- "Use Home" fallback (accurate to within ~100 yards -- close enough not to
+-- flag, and not a per-instance judgment call the way typed coordinates are).
 function GpsPrompt.choose(promptText)
-    local homeLat, homeLng = getHomeLocation()
     local errorText = nil
 
     while true do
-        local resultLat, resultLng, canceled, parseFailed
+        local resultLat, resultLng, resultApproximate, canceled, parseFailed
 
         LrFunctionContext.callWithContext("GpsPrompt", function(context)
             local props = LrBinding.makePropertyTable(context)
             props.coordinatesText = ""
-            props.saveAsHome = true
+            props.isApproximate = true
 
             local f = LrView.osFactory()
 
@@ -120,8 +111,8 @@ function GpsPrompt.choose(promptText)
                 width_in_chars = 30,
             })
             table.insert(args, f:checkbox {
-                title = "Save as home location",
-                value = LrView.bind("saveAsHome"),
+                title = "This is an approximate location",
+                value = LrView.bind("isApproximate"),
             })
 
             local dialogArgs = {
@@ -129,22 +120,17 @@ function GpsPrompt.choose(promptText)
                 contents = f:column(args),
                 actionVerb = "Use These Coordinates",
                 cancelVerb = "Cancel",
+                otherVerb = string.format("Use Home (%.4f, %.4f)", HomeLocation.lat, HomeLocation.lng),
             }
-            if homeLat and homeLng then
-                dialogArgs.otherVerb = string.format("Use Home (%.4f, %.4f)", homeLat, homeLng)
-            end
 
             local result = LrDialogs.presentModalDialog(dialogArgs)
 
             if result == "other" then
-                resultLat, resultLng = homeLat, homeLng
+                resultLat, resultLng, resultApproximate = HomeLocation.lat, HomeLocation.lng, false
             elseif result == "ok" then
                 local lat, lng = parseCoordinates(props.coordinatesText)
                 if lat then
-                    resultLat, resultLng = lat, lng
-                    if props.saveAsHome then
-                        storeHomeLocation(lat, lng)
-                    end
+                    resultLat, resultLng, resultApproximate = lat, lng, props.isApproximate
                 else
                     parseFailed = true
                 end
@@ -154,10 +140,10 @@ function GpsPrompt.choose(promptText)
         end)
 
         if canceled then
-            return nil, nil
+            return nil, nil, nil
         end
         if resultLat then
-            return resultLat, resultLng
+            return resultLat, resultLng, resultApproximate
         end
         if parseFailed then
             errorText = "Couldn't read that as coordinates (decimal \"latitude, longitude\" or DMS like 41°18'11\" N 74°14'21\" W) -- try again, or Cancel."
@@ -199,7 +185,7 @@ function GpsPrompt.ensureGpsOnAllPhotos(photos, reasonText)
         )
     end
 
-    local lat, lng = GpsPrompt.choose(promptText)
+    local lat, lng, isApproximate = GpsPrompt.choose(promptText)
     if not lat then
         return false
     end
@@ -208,6 +194,9 @@ function GpsPrompt.ensureGpsOnAllPhotos(photos, reasonText)
     catalog:withWriteAccessDo("Set GPS location", function()
         for _, photo in ipairs(missing) do
             photo:setRawMetadata("gps", { latitude = lat, longitude = lng })
+            if isApproximate then
+                photo:setPropertyForPlugin(_PLUGIN, "approximateLocation", "yes")
+            end
         end
     end)
 
