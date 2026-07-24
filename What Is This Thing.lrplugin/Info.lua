@@ -31,6 +31,38 @@ return {
             title = "Edit Taxon Info",
             file = "EditTaxonInfo.lua",
         },
+        {
+            title = "Split Observation",
+            file = "SplitObservation.lua",
+        },
+        {
+            title = "Merge Observation",
+            file = "MergeObservation.lua",
+        },
+        {
+            title = "Set iNat Observation",
+            file = "SetINatObservation.lua",
+        },
+        {
+            title = "Sync from iNaturalist",
+            file = "SyncFromINaturalist.lua",
+        },
+        {
+            title = "Full Sync from iNaturalist",
+            file = "FullSyncFromINaturalist.lua",
+        },
+        {
+            title = "Show iNat Sync State (one-off)",
+            file = "ShowINatSyncState.lua",
+        },
+        {
+            title = "Show Observation Filenames (one-off)",
+            file = "ShowObservationFilenames.lua",
+        },
+        {
+            title = "Rebuild Mismatch List (one-off)",
+            file = "RebuildMismatchList.lua",
+        },
     },
 
     VERSION = { major = 0, minor = 1, revision = 0, build = 0 },

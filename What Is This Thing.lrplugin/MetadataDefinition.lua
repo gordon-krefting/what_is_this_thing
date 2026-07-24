@@ -11,9 +11,9 @@
 --
 -- NAMING NOTE: `observationId` here is a purely local, auto-generated
 -- UUID shared by photos identified together in one batch -- NOT the same
--- thing as a future `iNatObservationId` field (a still-separate TODO) that
--- would hold the real observation ID from iNaturalist's own servers. Keep
--- these two clearly distinct if/when the iNat-sync field gets added.
+-- thing as `iNatObservationId` below, which holds the real observation ID
+-- from iNaturalist's own servers (set by the "Sync from iNaturalist"
+-- feature). Keep these two clearly distinct.
 return {
     metadataFieldsForPhotos = {
         {
@@ -117,6 +117,28 @@ return {
             -- for. Visible in the Metadata panel but not user-editable
             -- there; still settable programmatically via
             -- setPropertyForPlugin().
+            readOnly = true,
+        },
+        {
+            id = "iNatObservationId",
+            title = "iNat Observation ID",
+            dataType = "string",
+            searchable = true,
+            -- The REAL iNaturalist observation id (from the "Sync from
+            -- iNaturalist" feature), deliberately distinct from the
+            -- purely-local `observationId` above -- that one is a
+            -- plugin-generated UUID that never leaves the catalog; this one
+            -- identifies a real record on iNat's own servers. Auto-set by
+            -- the sync, never hand-typed.
+            readOnly = true,
+        },
+        {
+            id = "iNatObservationUrl",
+            title = "iNat Observation",
+            dataType = "url",
+            searchable = true,
+            -- Same clickable-link pattern as the existing wikipediaUrl
+            -- field. Written alongside iNatObservationId.
             readOnly = true,
         },
 

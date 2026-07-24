@@ -16,6 +16,8 @@ local INaturalist = {}
 local API_URL = "https://api.inaturalist.org/v1/computervision/score_image"
 local TAXA_URL = "https://api.inaturalist.org/v1/taxa/"
 local TAXA_SEARCH_URL = "https://api.inaturalist.org/v1/taxa"
+local OBSERVATIONS_URL = "https://api.inaturalist.org/v1/observations"
+local OBSERVATIONS_V2_URL = "https://api.inaturalist.org/v2/observations"
 
 -- Ranks worth showing as their own level in a keyword hierarchy -- skips
 -- phylum (near-useless for browsing a personal photo library) and the
@@ -79,6 +81,26 @@ end
 local function storeToken(token)
     local prefs = LrPrefs.prefsForPlugin()
     prefs.inaturalistToken = token
+end
+
+-- Returns a stored token, prompting (and storing the result) if none is
+-- saved yet. Exposed (unlike getStoredToken/promptForToken/storeToken,
+-- which stay private) so other modules -- e.g. the iNaturalist sync
+-- feature -- can get an authenticated header without duplicating the
+-- prompt dialog. Callers needing 401-retry behavior (like identify()
+-- already does) should call promptForToken again themselves and re-store
+-- via a fresh call to this same get-or-prompt shape; this function only
+-- covers the "no token saved yet" case, not mid-call expiry.
+function INaturalist.getAuthToken()
+    local token = getStoredToken()
+    if not token or token == "" then
+        token = promptForToken()
+        if not token then
+            error("No iNaturalist API token provided.")
+        end
+        storeToken(token)
+    end
+    return token
 end
 
 -- lat/lng, if given, feed iNaturalist's own geo-based accuracy boost (a
@@ -765,6 +787,254 @@ function INaturalist.getTaxonFacts(taxonId, lat, lng)
         establishmentMeans = establishmentMeans,
         wikipediaUrl = taxon.wikipedia_url,
     }
+end
+
+-- Pulls every observation for `username` (paginated, 200/page), optionally
+-- constrained to those updated since `updatedSince` (an ISO8601 string) --
+-- pass nil for a first-ever full pull. Calls onProgress(pulledSoFar) after
+-- each page, if given. Returns a flat list of raw observation entries --
+-- shape confirmed live during planning: { id, taxon, time_observed_at,
+-- photos, identifications, user, updated_at, ... }, where `taxon` already
+-- carries { id, name, rank, preferred_common_name } (the current
+-- community-agreed ID, no extra fetch needed to know what it currently is).
+-- Errors (rather than returning {}) on failure -- unlike the optional-
+-- enrichment functions elsewhere in this file, a sync pull failing outright
+-- should stop the whole run, not silently proceed with partial data.
+function INaturalist.getMyObservations(username, updatedSince, onProgress)
+    local observations = {}
+    local page = 1
+    local perPage = 200
+
+    while true do
+        local url = OBSERVATIONS_URL .. "?user_id=" .. urlEncode(username)
+            .. "&order_by=updated_at&order=asc&per_page=" .. perPage .. "&page=" .. page
+        if updatedSince then
+            url = url .. "&updated_since=" .. urlEncode(updatedSince)
+        end
+
+        local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
+        if not ok then
+            error("Couldn't reach iNaturalist to pull observations.")
+        end
+        local status = hdrs and hdrs.status
+        if status ~= 200 then
+            error("iNaturalist request failed (status " .. tostring(status) .. ") while pulling observations.")
+        end
+
+        local decodeOk, decoded = pcall(JSON.decode, response)
+        if not decodeOk then
+            error("Couldn't parse iNaturalist's observations response.")
+        end
+
+        local results = decoded.results or {}
+        for _, r in ipairs(results) do
+            table.insert(observations, r)
+        end
+
+        if onProgress then
+            onProgress(#observations)
+        end
+
+        if #results < perPage then
+            break
+        end
+        page = page + 1
+        LrTasks.sleep(1.0)
+    end
+
+    return observations
+end
+
+-- Fetches specific observations by id (comma-joined, standard iNat API
+-- convention -- NOT separately live-verified this session the way the
+-- other new endpoints here were; worth confirming on the first real run).
+-- Used by the sync's retry-list mechanism to re-fetch observations that
+-- failed to apply on a previous run, independent of `updated_since`.
+-- Returns {} (not an error) if `ids` is empty, since an empty retry list
+-- is the normal/common case, not a failure.
+function INaturalist.getObservationsByIds(ids)
+    if not ids or #ids == 0 then
+        return {}
+    end
+
+    local idList = {}
+    for _, id in ipairs(ids) do
+        table.insert(idList, tostring(id))
+    end
+    local url = OBSERVATIONS_URL .. "?id=" .. table.concat(idList, ",")
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
+    if not ok then
+        error("Couldn't reach iNaturalist to pull retry-list observations.")
+    end
+    local status = hdrs and hdrs.status
+    if status ~= 200 then
+        error("iNaturalist request failed (status " .. tostring(status) .. ") while pulling retry-list observations.")
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk then
+        error("Couldn't parse iNaturalist's observations response.")
+    end
+
+    return decoded.results or {}
+end
+
+-- Checks whether `username` currently agrees with an observation's
+-- consensus ID, via its `identifications` array: finds the entry where
+-- `user.login == username` and `current == true`, and checks its
+-- `category` -- "maverick" means the user's current identification
+-- disagrees with the community consensus; any other category ("supporting",
+-- "leading", "improving") means they agree. Returns true if the user has no
+-- identification on this observation at all (nothing to disagree with, so
+-- "agrees" is the sensible default -- callers should only skip an update on
+-- an explicit disagreement signal, not the absence of one). Confirmed live
+-- against a real observation (inaturalist.org/observations/382468756)
+-- during planning.
+function INaturalist.observationAgreesWithMe(observation, username)
+    for _, ident in ipairs(observation.identifications or {}) do
+        if ident.user and ident.user.login == username and ident.current then
+            return ident.category ~= "maverick"
+        end
+    end
+    return true
+end
+
+-- Shared v2-endpoint fetch-with-401-retry helper for the two functions
+-- below. Requires the v2 endpoint's sparse `fields` syntax with an
+-- authenticated request -- confirmed live during planning that
+-- `original_filename` is omitted from the standard v1 response (and even
+-- an unauthenticated v2 request), so this needs INaturalist.getAuthToken()'s
+-- token specifically. The v2 token is the same 24-hour JWT identify() uses;
+-- unlike identify(), an earlier version of this never retried on 401 --
+-- confirmed live as the real cause of untagged sibling photos staying
+-- untagged even after other fixes: a stale stored token made every call
+-- here fail outright with no visible error, silently skipping every
+-- mismatch check and absorption attempt in the entire run. Retries once
+-- with a freshly-prompted token, same pattern identify() already uses.
+-- Returns the single decoded observation object, or nil if the
+-- request/decode failed for any reason.
+local function fetchV2Observation(observationId, fieldsParam)
+    local token = INaturalist.getAuthToken()
+    local url = OBSERVATIONS_V2_URL .. "?id=" .. tostring(observationId)
+        .. "&fields=" .. urlEncode(fieldsParam)
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url, { { field = "Authorization", value = token } })
+    local status = ok and hdrs and hdrs.status
+
+    if status == 401 then
+        token = promptForToken()
+        if token then
+            storeToken(token)
+            ok, response, hdrs = LrTasks.pcall(LrHttp.get, url, { { field = "Authorization", value = token } })
+            status = ok and hdrs and hdrs.status
+        end
+    end
+
+    if status ~= 200 then
+        return nil
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk then
+        return nil
+    end
+
+    return decoded.results and decoded.results[1]
+end
+
+-- Fetches the original filenames of every photo attached to an iNat
+-- observation, for the group-membership-mismatch check. Returns a list of
+-- filenames (possibly empty), or nil if the request fails for any reason --
+-- callers should treat nil as "couldn't check this time", not as "zero
+-- photos", so a transient failure here doesn't get misread as an actual
+-- mismatch.
+function INaturalist.getObservationPhotoFilenames(observationId)
+    local observation = fetchV2Observation(observationId, "(id:!t,photos:(original_filename:!t))")
+    if not observation then
+        return nil
+    end
+
+    local rawPhotos = observation.photos or {}
+    local filenames = {}
+    for _, photo in ipairs(rawPhotos) do
+        if photo.original_filename and photo.original_filename ~= "" then
+            table.insert(filenames, photo.original_filename)
+        end
+    end
+
+    -- If the observation genuinely has photos but NONE of them yielded a
+    -- usable filename, this is a failed/incomplete fetch, not "zero
+    -- filenames" -- confirmed live that the v2 fields-based fetch doesn't
+    -- always populate original_filename even when authenticated (worked
+    -- for one observation, came back empty for another, for reasons not
+    -- fully understood). Returning an empty list here would be truthy
+    -- (Lua only treats nil/false as falsy), so the caller's mismatch check
+    -- would wrongly read it as "iNat confirmed zero photos" and flag every
+    -- local photo as "missing from iNat" -- confirmed live this happened.
+    -- Returning nil instead makes the caller correctly treat this as
+    -- "couldn't verify" and skip the mismatch check, same as any other
+    -- fetch failure.
+    if #rawPhotos > 0 and #filenames == 0 then
+        return nil
+    end
+
+    return filenames
+end
+
+-- Fallback signal for sibling-photo absorption when original_filename
+-- isn't usable at all -- confirmed live: iNat can return a fully valid,
+-- authenticated 200 response whose photos array has ONLY `id` fields, no
+-- filenames, for a given observation, for reasons unrelated to auth/token
+-- expiry. The photo COUNT itself is unaffected by that (the `photos` array
+-- always reflects how many photos are actually attached), so it remains a
+-- reliable way to know whether the local group is missing any, even when
+-- there's no way to tell WHICH ones by name. Returns nil on failure.
+function INaturalist.getObservationPhotoCount(observationId)
+    local observation = fetchV2Observation(observationId, "(id:!t,photos:(id:!t))")
+    if not observation then
+        return nil
+    end
+    return #(observation.photos or {})
+end
+
+-- Diagnostic-only (used by ShowObservationFilenames.lua): performs the
+-- exact same fetch as getObservationPhotoFilenames, but never swallows the
+-- failure -- returns the URL, the raw pcall/HTTP-status/response-snippet
+-- for the first attempt, and (if a 401 triggered a retry) the same detail
+-- for the retry, so a real failure can actually be diagnosed instead of
+-- just seeing "request failed" with nothing else to go on. Added after
+-- getObservationPhotoFilenames's own 401-retry fix (see there) didn't
+-- visibly change anything live -- confirming whether that's because the
+-- status genuinely isn't 401 (e.g. the request errors out before ever
+-- getting a status at all) or something else entirely.
+function INaturalist.debugObservationPhotoFetch(observationId)
+    local token = INaturalist.getAuthToken()
+    local url = OBSERVATIONS_V2_URL .. "?id=" .. tostring(observationId)
+        .. "&fields=" .. urlEncode("(id:!t,photos:(original_filename:!t))")
+
+    local function attempt(tok)
+        local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url, { { field = "Authorization", value = tok } })
+        return {
+            ok = ok,
+            errorMessage = (not ok) and tostring(response) or nil,
+            status = ok and hdrs and hdrs.status or nil,
+            responseSnippet = (ok and type(response) == "string") and response:sub(1, 300) or nil,
+        }
+    end
+
+    local info = { url = url, first = attempt(token) }
+
+    if info.first.status == 401 then
+        local freshToken = promptForToken()
+        info.retriedWithFreshToken = freshToken ~= nil
+        if freshToken then
+            storeToken(freshToken)
+            info.retry = attempt(freshToken)
+        end
+    end
+
+    return info
 end
 
 return INaturalist

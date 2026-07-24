@@ -57,8 +57,11 @@ end
 -- the "Observation ID" custom field -- a purely local id shared by every
 -- photo identified together in one batch, so they can be found again later
 -- (e.g. to correct or annotate the identification) without having to
--- remember/reselect the original photos.
-local function generateUUID()
+-- remember/reselect the original photos. Exported (not just used
+-- internally by applyIdentification below) so other commands needing a
+-- fresh Observation ID -- e.g. SplitObservation.lua, splitting a
+-- mistakenly-shared group back apart -- don't need their own copy.
+function KeywordWriter.generateUUID()
     local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
     return (template:gsub("[xy]", function(c)
         local v = (c == "x") and math.random(0, 15) or math.random(8, 11)
@@ -98,6 +101,35 @@ function KeywordWriter.findSpeciesName(photo)
         end
     end
     return nil
+end
+
+-- True if `photo`'s species keyword (see findSpeciesName) is nested at
+-- least one level below the "Species ID" root -- i.e. has a real ancestry
+-- chain (class/order/family/genus) rather than being a flat "Species ID >
+-- leaf" tag with nothing in between. False if the photo has no species
+-- keyword at all, or if its keyword sits directly under the root.
+--
+-- Exists to detect and repair photos whose ancestry lookup silently failed
+-- when they were originally tagged -- getMajorAncestry degrades to an
+-- empty list on ANY failure (rate limiting, a network hiccup) by design,
+-- with no error ever surfaced at the time, so a flat tag from a bulk
+-- operation (e.g. a historical backfill) can go unnoticed indefinitely
+-- unless something explicitly checks for it later, as the iNaturalist
+-- sync's applyMatch now does.
+function KeywordWriter.hasFullAncestry(photo)
+    local catalog = LrApplication.activeCatalog()
+    local parentKeyword = findParentKeyword(catalog)
+    if not parentKeyword then
+        return false
+    end
+
+    local currentKeywords = photo:getRawMetadata("keywords") or {}
+    for _, kw in ipairs(currentKeywords) do
+        if isDescendantOf(kw, parentKeyword) then
+            return kw:getParent() ~= parentKeyword
+        end
+    end
+    return false
 end
 
 -- Removes any keyword on `photo` nested anywhere under `parentKeyword`,
@@ -223,7 +255,7 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     -- WhatIsThisPlant.lua) -- normalize it here rather than storing an
     -- ambiguous-looking blank/"(unknown)" value for the common case.
     local rankValue = candidate.rank or "species"
-    local observationId = findExistingObservationId(photos) or generateUUID()
+    local observationId = findExistingObservationId(photos) or KeywordWriter.generateUUID()
 
     -- Network call (inside getTaxonFacts) -- must happen before the write
     -- transaction starts, not inside it.
