@@ -800,8 +800,22 @@ end
 -- Errors (rather than returning {}) on failure -- unlike the optional-
 -- enrichment functions elsewhere in this file, a sync pull failing outright
 -- should stop the whole run, not silently proceed with partial data.
+-- Second return value is a per-page diagnostic trace (url, resultCount,
+-- totalResults per iNat's own response) -- added 2026-07-24 while
+-- diagnosing a live case where several incremental pulls in a row
+-- returned nothing new for observations already confirmed (via requests
+-- made outside Lightroom) to be visible on iNat's side. Threaded through
+-- to the sync log so a live failure can be diagnosed from what was
+-- actually requested/returned, rather than guessed at from outside.
+-- `Cache-Control`/`Pragma: no-cache` request headers added at the same
+-- time -- confirmed live that this endpoint sits behind a CDN
+-- (`Cache-Control: public, max-age=300` on its responses) -- asking it to
+-- skip that cache is a cheap, safe precaution for a correctness-critical
+-- incremental pull, even though it isn't yet confirmed to be the actual
+-- cause of the observed misses.
 function INaturalist.getMyObservations(username, updatedSince, onProgress)
     local observations = {}
+    local pullDebug = {}
     local page = 1
     local perPage = 200
 
@@ -812,7 +826,10 @@ function INaturalist.getMyObservations(username, updatedSince, onProgress)
             url = url .. "&updated_since=" .. urlEncode(updatedSince)
         end
 
-        local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
+        local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url, {
+            { field = "Cache-Control", value = "no-cache" },
+            { field = "Pragma", value = "no-cache" },
+        })
         if not ok then
             error("Couldn't reach iNaturalist to pull observations.")
         end
@@ -831,6 +848,13 @@ function INaturalist.getMyObservations(username, updatedSince, onProgress)
             table.insert(observations, r)
         end
 
+        table.insert(pullDebug, {
+            url = url,
+            page = page,
+            resultCount = #results,
+            totalResults = decoded.total_results,
+        })
+
         if onProgress then
             onProgress(#observations)
         end
@@ -842,7 +866,7 @@ function INaturalist.getMyObservations(username, updatedSince, onProgress)
         LrTasks.sleep(1.0)
     end
 
-    return observations
+    return observations, pullDebug
 end
 
 -- Fetches specific observations by id (comma-joined, standard iNat API

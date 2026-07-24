@@ -14,6 +14,44 @@ local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local MergeCandidatesDialog = dofile(LrPathUtils.child(_PLUGIN.path, "MergeCandidatesDialog.lua"))
 
+-- Confirmed live 2026-07-24: observations uploaded moments before a sync
+-- run can fail to appear in that run's `updated_since` pull even though
+-- the cursor captured at the start of the run is already later than
+-- their `updated_at` -- iNaturalist's search backend hadn't indexed them
+-- yet at the moment of the query. Because the cursor still advances to
+-- "now" regardless, and an observation's `updated_at` never changes again
+-- on its own, this silently and permanently orphans it: it's never
+-- pulled at all, so it never reaches any of pullAndMatch's report
+-- buckets and never gets logged. Subtracting this margin before storing
+-- the cursor makes every incremental pull re-cover a trailing window,
+-- catching anything that was still indexing at the moment of the
+-- previous run. Safe to re-scan -- anything already linked hits the
+-- fast path in pullAndMatch almost for free.
+local SYNC_CURSOR_SAFETY_MARGIN_SECONDS = 60 * 60
+
+-- Confirmed live 2026-07-24 as the actual root cause of the incremental
+-- sync silently finding nothing new: `LrDate.timeToW3CDate` on this
+-- system renders a near-"now" cocoa time WITHOUT any trailing timezone
+-- designator at all (e.g. "2026-07-24T17:04:48.013", not
+-- "...T17:04:48-06:00" or "...Z") -- confirmed via the pull diagnostic
+-- trace below. The numeric hour/minute/second IS correct UTC (cocoa time
+-- is an absolute UTC instant, and the rendered value matched true
+-- wall-clock UTC, not the local -06:00 offset) -- only the designator is
+-- missing. iNaturalist's API silently treats a designator-less
+-- `updated_since` near "now" as matching nothing (confirmed live:
+-- `total_results: 0` for an offset-less near-now timestamp vs. correct
+-- results for the identical instant with "Z" appended) rather than
+-- erroring, so this was invisible except as "sync did nothing." Only
+-- appends "Z" if a designator isn't already present, so this stays a
+-- no-op if the SDK's behavior differs on another system/version.
+local function toUtcW3CDate(time)
+    local raw = LrDate.timeToW3CDate(time)
+    if raw:match("Z$") or raw:match("[%+%-]%d%d:%d%d$") then
+        return raw
+    end
+    return raw .. "Z"
+end
+
 -- Shared orchestration for both "Sync from iNaturalist" (incremental,
 -- `updated_since`-scoped after the first run) and "Full Sync from
 -- iNaturalist" (always pulls the entire history, ignoring the stored
@@ -443,7 +481,7 @@ end
 -- Returns the file path on success, or nil if there was nothing to log
 -- (empty run) or the write failed.
 local function writeFullSyncLog(runLog, meta)
-    if #runLog == 0 then
+    if #runLog == 0 and not (meta.pullDebug and #meta.pullDebug > 0) then
         return nil
     end
 
@@ -456,6 +494,18 @@ local function writeFullSyncLog(runLog, meta)
         "=== " .. LrDate.timeToW3CDate(LrDate.currentTime()) .. " -- " .. tostring(meta.syncType)
             .. " -- " .. tostring(#runLog) .. " observation(s) ===",
     }
+    -- Diagnostic trace of the actual pull request(s) -- added 2026-07-24
+    -- while chasing a live case where incremental runs kept returning
+    -- nothing new despite requests made outside Lightroom, moments later,
+    -- against the same window, correctly returning new observations. Logs
+    -- exactly what was requested and what iNat said existed, so a repeat
+    -- is diagnosable from this file alone rather than guessed at.
+    if meta.pullDebug then
+        for _, page in ipairs(meta.pullDebug) do
+            table.insert(lines, "  [pull] page " .. tostring(page.page) .. " -- " .. tostring(page.resultCount)
+                .. " result(s) of " .. tostring(page.totalResults) .. " total -- " .. tostring(page.url))
+        end
+    end
     for _, entry in ipairs(runLog) do
         local line = "  #" .. tostring(entry.observationId)
         if entry.taxonName then
@@ -575,7 +625,7 @@ function INatSyncRunner.run(options)
         end
 
         local lastSyncTime = not options.forceFullPull and INatSync.getLastSyncTime() or nil
-        local updatedSinceStr = lastSyncTime and LrDate.timeToW3CDate(lastSyncTime) or nil
+        local updatedSinceStr = lastSyncTime and toUtcW3CDate(lastSyncTime) or nil
         local retryIds = INatSync.getPendingRetryIds()
         local pendingMismatchIds = INatSync.getPendingMismatchIds()
         local syncStartTime = LrDate.currentTime()
@@ -851,13 +901,13 @@ function INatSyncRunner.run(options)
             -- window next time rather than risk skipping anything that
             -- wasn't reached.
             if not progressScope:isCanceled() and not canceledDuringApply then
-                INatSync.setLastSyncTime(syncStartTime)
+                INatSync.setLastSyncTime(syncStartTime - SYNC_CURSOR_SAFETY_MARGIN_SECONDS)
             end
 
             local logPath = writeMismatchLog(mismatches)
             local syncType = options.forceRecheckAll and "Rebuild Mismatch List"
                 or options.forceFullPull and "Full Sync" or "Sync"
-            local fullLogPath = writeFullSyncLog(runLog, { syncType = syncType })
+            local fullLogPath = writeFullSyncLog(runLog, { syncType = syncType, pullDebug = report.pullDebug })
             LrDialogs.message("Sync from iNaturalist", formatSummary(counts, mismatches, logPath, fullLogPath), "info")
         end)
 

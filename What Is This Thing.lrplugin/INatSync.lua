@@ -475,7 +475,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     local sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime, groupsByScientificName =
         buildLocalIndex(catalog)
 
-    local observations = INaturalist.getMyObservations(username, updatedSince, onProgress)
+    local observations, pullDebug = INaturalist.getMyObservations(username, updatedSince, onProgress)
 
     if retryIds and #retryIds > 0 then
         local seen = {}
@@ -650,6 +650,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
         noLocalMatchReasons = noLocalMatchReasons,
         photosByFilename = photosByFilename,
         untaggedSingletonsSortedByTime = untaggedSingletonsSortedByTime,
+        pullDebug = pullDebug,
     }
 end
 

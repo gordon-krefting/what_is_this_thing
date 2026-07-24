@@ -1668,36 +1668,170 @@ fixture's `makeObservation` helper omits `photos` entirely, so the new
 code's very first guard clause (`not photo`) returns nil immediately with
 no HTTP call attempted, in every existing case across all test files.
 
+## Sync cursor now trails the run's start time by a 60-minute safety margin (2026-07-24)
+
+The "cursor-orphaned observations" gap noted below as deferred turned out
+to have a second, more direct trigger, caught live the same day: the user
+uploaded 5 new observations directly to iNaturalist and ran "Sync from
+iNaturalist" shortly after. The run completed with no errors but silently
+skipped all 5 -- they never appeared in the full per-observation sync log
+at all (not even as `no_local_match`), which meant `pullAndMatch` never
+received them from the API pull in the first place.
+
+Reconstructed the timeline from the stored cursor and a live API query:
+the 5 observations' `updated_at` was `2026-07-24T17:33:13/14Z`; the sync
+run captured its cursor as `syncStartTime = LrDate.currentTime()` at
+`17:33:57Z`, ~43 seconds later. Querying the live API directly just now
+with `updated_since` set well before that window returns all 5
+observations correctly -- so the API itself and the query logic are both
+fine. The likely explanation is that iNaturalist's search backend hadn't
+finished indexing the 5 observations yet at the moment the sync's HTTP
+request actually went out, so that request came back with zero matches
+for them even though the previous cursor was well before their creation
+time. The run then stored `syncStartTime` (17:33:57Z) as the new cursor
+regardless of what the pull found -- and since that's now *later* than
+the 5 observations' `updated_at`, every future incremental run would have
+kept excluding them forever, with no diagnostic, because they'd never
+reach any of `pullAndMatch`'s report buckets to be logged.
+
+This is the same failure shape as the deferred item below, just with a
+different (and more mundane) trigger than "an earlier run's cursor
+advanced without applying" -- a plain read-after-write race between
+"cursor captured" and "observation indexed." Fix: `INatSyncRunner.lua`
+now subtracts a `SYNC_CURSOR_SAFETY_MARGIN_SECONDS` (60 minutes, per user
+request) from `syncStartTime` before calling `INatSync.setLastSyncTime`,
+so every incremental pull re-covers a trailing hour-long window rather
+than advancing to the exact instant the run started. This is cheap to
+re-scan: anything already linked hits `pullAndMatch`'s fast path (a
+direct `iNatObservationId` match) almost for free, as already evidenced
+by the hundreds of `linkedOnly` entries a full-history pull produces.
+
+Immediate workaround for the already-orphaned 5 observations (and
+anything else affected before this fix): run "Full Sync from
+iNaturalist" once, which ignores the stored cursor entirely.
+
+Regression test: `mock_test_syncfrominaturalist.lua` asserts that after a
+normal run, `fakePrefs.lastINatSyncAt` equals `syncStartTime - 3600`, not
+`syncStartTime` itself.
+
+## Real root cause found: `LrDate.timeToW3CDate` omits the timezone designator, silently zeroing the incremental pull (2026-07-24)
+
+The 60-minute margin above did NOT fix the live problem -- the user tried
+again (waited 5 minutes, ran incremental sync) and it still found
+nothing. Three incremental runs in a row (17:55, 17:58, 18:05 UTC) all
+returned byte-identical results (the same 3 unrelated retry-list
+observations, nothing else) despite using genuinely different cursor
+values each time, while every equivalent query made from outside
+Lightroom succeeded immediately. That pattern -- identical stale output
+across different real requests -- didn't fit either of the theories
+tried so far (backend indexing lag, CDN staleness), so rather than keep
+guessing from outside, added a diagnostic trace: `getMyObservations` now
+returns a second value (per-page request URL, result count, iNat's
+reported `total_results`), threaded through `pullAndMatch`'s `report` and
+into the full sync log (`writeFullSyncLog`'s `meta.pullDebug`).
+
+The next live run's log line was the actual smoking gun:
+
+```
+[pull] page 1 -- 0 result(s) of 0 total -- https://api.inaturalist.org/v1/observations?...&updated_since=2026-07-24T17%3A04%3A48.013
+```
+
+Decoded: `updated_since=2026-07-24T17:04:48.013` -- **no timezone
+designator at all**, just fractional seconds. `LrDate.timeToW3CDate`, on
+this system, renders a near-"now" cocoa time without any trailing `Z` or
+`±HH:MM`. Confirmed live via direct A/B curl requests against the real
+API:
+
+- `updated_since=2026-07-24T17:04:48.013` (designator-less, matching
+  what the plugin actually sent) -> `total_results: 0`
+- `updated_since=2026-07-24T17:04:48Z` (same instant, `Z` appended) ->
+  `total_results: 9`, including the observations the user had just
+  uploaded
+
+Also confirmed the numeric hour/minute/second the SDK renders IS correct
+UTC (the value matched true wall-clock UTC at the time, not shifted by
+the system's actual -06:00 local offset) -- only the designator itself is
+missing. And confirmed the failure is specific to *near-now* values, not
+designator-less timestamps generally: an old designator-less date (weeks
+in the past) still returned correct results (286), matching the theory
+that the API defaults an ambiguous/unparseable-as-such timestamp to
+something that happens not to matter when it's already far in the past,
+but does matter when it's within the pull's normal near-now range.
+iNaturalist's API never errors on this -- it just silently reports zero
+matches, which is exactly why it read as "sync isn't picking up new
+observations" rather than as an obvious bug.
+
+This fully explains the whole day's saga, including the two earlier
+(wrong, or at best incomplete) theories:
+- **CDN caching** (`Cache-Control: public, max-age=300`, confirmed live
+  as real and reproducible via a cache `HIT` on a repeat request) is a
+  genuine property of this endpoint, but wasn't the actual cause here --
+  a red herring surfaced while investigating, not the bug.
+- **Backend indexing lag** (the original explanation offered for the
+  first "5 new observations" report) was also a plausible-sounding but
+  ultimately wrong theory -- the observations were fully queryable via
+  `updated_since` the whole time, given a correctly-formatted parameter.
+- The 60-minute cursor margin (previous section) remains a reasonable
+  defense-in-depth measure and is being kept, but it was never going to
+  fix this: the cursor value was fine, the *string format* sent to the
+  API was the actual defect.
+
+Fix: `INatSyncRunner.lua` no longer passes `LrDate.timeToW3CDate`'s
+output to the API directly. A small `toUtcW3CDate(time)` wrapper checks
+whether the string already ends in `Z` or a `±HH:MM` offset and appends
+`Z` if not, guaranteeing a valid UTC designator regardless of what the
+underlying SDK call does on a given system/version. Deliberately doesn't
+try to explain or rely on any theory of *why* the SDK omits it --- just
+makes the code correct regardless.
+
+Regression test: `mock_test_syncfrominaturalist.lua`'s `LrDate.timeToW3CDate`
+mock was changed to reproduce the real bug (renders the date/time with NO
+designator, matching the live "...T17:04:48.013" shape) rather than its
+previous hardcoded "...Z" stub, which would have masked exactly this
+class of bug. A new assertion decodes the actual `updated_since` value
+from the request URL the mocked run produced and confirms it ends in
+`Z`. Verified the test is meaningful (not vacuously passing) by
+temporarily reverting the fix and confirming the assertion fails with
+the exact designator-less shape.
+
+Also added `Cache-Control: no-cache` / `Pragma: no-cache` request headers
+to the observations pull, as a cheap precaution given the confirmed CDN
+layer -- not proven necessary for this specific bug, but harmless and
+directionally correct for a correctness-critical incremental request.
+
+The pull diagnostic trace (`meta.pullDebug` in the full sync log) is kept
+permanently, not stripped back out -- this exact category of "sync did
+nothing and left no clue why" is precisely what it exists to prevent
+next time.
+
 ## Explicitly deferred / still open
 
-- **Cursor-orphaned observations have no recheck mechanism** -- diagnosed
-  2026-07-24 as (at least one cause of) the earlier "nothing happened"
-  reports. Confirmed live against observation #384297708: iNat's current
-  identification (agreed with, own "supporting" ID) is species-level
-  `Polygonia interrogationis`; the local tag was still genus-level
-  `Polygonia`, direct-queried from `AgSearchablePhotoProperty` (the actual
-  storage table for this plugin's custom fields -- NOT `AgPhotoProperty`,
-  which was the wrong table queried in earlier sessions, hence that
-  standing "zero rows despite obvious usage" mystery; both tables exist,
-  only the searchable one gets populated). The stored `lastINatSyncAt`
-  cursor (2026-07-24T03:22:58 UTC) was already PAST this observation's
-  `updated_at` (2026-07-24T02:42:22 UTC), so `updated_since`-filtered
-  incremental Sync will never re-fetch it again. Confirmed this isn't a
-  matching-algorithm bug: replaying the real `INatSync.pullAndMatch`
-  against the live API with a pre-update cursor correctly finds and
-  resolves it to `toApply`. The gap is structural: unlike apply-failures
-  (`iNatPendingRetryIds`) or filename mismatches
-  (`iNatPendingMismatchIds`), an observation that updates on iNat's side
-  but never gets caught by any run's `updated_since` window (because some
-  earlier run's cursor already advanced past it without applying it -- the
-  exact sequence of which run did this isn't reconstructable, since no log
-  existed before this session's logging feature) has NO bounded recheck
-  list putting it back in view. Full Sync (ignores the cursor, full
-  history pull) is the workaround already available today. TODO: design a
-  permanent fix -- likely a periodic reconciliation pass, independent of
-  the cursor, that re-verifies already-linked observations' current
-  `updated_at` against what was last actually applied locally, rather than
-  trusting the incremental delta alone.
+- **Cursor-orphaned observations have no *general* recheck mechanism** --
+  diagnosed 2026-07-24 as (at least one cause of) the earlier "nothing
+  happened" reports. Confirmed live against observation #384297708: iNat's
+  current identification (agreed with, own "supporting" ID) is
+  species-level `Polygonia interrogationis`; the local tag was still
+  genus-level `Polygonia`, direct-queried from
+  `AgSearchablePhotoProperty` (the actual storage table for this plugin's
+  custom fields -- NOT `AgPhotoProperty`, which was the wrong table
+  queried in earlier sessions, hence that standing "zero rows despite
+  obvious usage" mystery; both tables exist, only the searchable one gets
+  populated). The stored `lastINatSyncAt` cursor
+  (2026-07-24T03:22:58 UTC) was already PAST this observation's
+  `updated_at` (2026-07-24T02:42:22 UTC) -- a ~40-minute gap, so the
+  60-minute safety margin added above (same day, see previous section)
+  would have caught this specific case too, but the margin is a
+  mitigation bounded by its size, not a structural fix: any cursor
+  advance that outpaces an update by more than the margin -- a long
+  `dofile` hang, a genuinely slow API index, a run spanning more than an
+  hour -- can still orphan an observation with no bounded recheck list
+  putting it back in view (unlike apply-failures, `iNatPendingRetryIds`,
+  or filename mismatches, `iNatPendingMismatchIds`). Full Sync (ignores
+  the cursor, full history pull) remains the workaround for anything that
+  slips past the margin. TODO if this recurs: a periodic reconciliation
+  pass, independent of the cursor, that re-verifies already-linked
+  observations' current `updated_at` against what was last actually
+  applied locally, rather than trusting the incremental delta alone.
 - **Recovering "orphan" observations** (made in the iNat phone app, or
   from photos living in Apple Photos -- never imported into Lightroom;
   distinct from the false-collision case above, which involves photos
