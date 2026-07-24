@@ -11,6 +11,7 @@ local LrFunctionContext = import 'LrFunctionContext'
 local LrHttp = import 'LrHttp'
 
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
+local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local MergeCandidatesDialog = dofile(LrPathUtils.child(_PLUGIN.path, "MergeCandidatesDialog.lua"))
 
 -- Shared orchestration for both "Sync from iNaturalist" (incremental,
@@ -45,133 +46,261 @@ local function describeCandidateGroups(groups)
     return labels
 end
 
--- Presents one small dialog per still-ambiguous local group in a collision
--- cluster (more than one candidate group AND more than one candidate
--- observation shared a capture time, with no existing tag to disambiguate
--- automatically -- see INatSync.pullAndMatch). Each dialog offers the
--- remaining candidate observations as radio choices; picking one removes
--- it from the pool offered to the next group in the same cluster.
+-- "#<id> -- <common name> (<scientific name>) -- N photo(s)" -- anchors
+-- the collision dialog and the new-link confirmation dialog on what iNat
+-- itself reliably reports (the taxon and the photo count, both already
+-- present in the pulled observation, no extra fetch needed) rather than
+-- filenames, which are frequently missing, unreliable, or entirely absent
+-- from iNat's own data (see the filename-count-gate comments in
+-- INatSync.lua). Paired with an actual downloaded thumbnail (see
+-- buildINatThumbnail below) for a fuller visual comparison, not just text.
+local function describeObservation(obs)
+    local label = "#" .. tostring(obs.id)
+    if obs.taxon then
+        label = label .. " -- " .. (obs.taxon.preferred_common_name or obs.taxon.name)
+            .. " (" .. obs.taxon.name .. ")"
+    end
+    local photoCount = obs.photos and #obs.photos or 0
+    label = label .. " -- " .. photoCount .. " photo" .. (photoCount == 1 and "" or "s")
+    return label
+end
+
+-- One column per local candidate group: a row of its own photo thumbnail(s)
+-- (150x150, same size as MergeCandidatesDialog's neighbor columns) with a
+-- caption control underneath -- multiple candidates get placed side by
+-- side in a single outer row (see resolveClusterManually/confirmNewLink),
+-- matching MergeCandidatesDialog's layout, rather than one full-width
+-- 200x200 block stacked per candidate, which was overflowing the screen
+-- for any cluster with more than a couple of candidates.
+local function buildCandidateColumn(f, group, caption)
+    local photoColumns = {}
+    for _, photo in ipairs(group.photos) do
+        local column = {
+            f:catalog_photo {
+                photo = photo,
+                width = 150,
+                height = 150,
+                frame_width = 1,
+            },
+        }
+        -- Confirmed live this happens for files on a currently-disconnected
+        -- external drive (checkPhotoAvailability must be called from an
+        -- async task, which this already is).
+        if not photo:checkPhotoAvailability() then
+            table.insert(column, f:static_text {
+                title = "(unavailable)",
+                width_in_chars = 22,
+            })
+        end
+        table.insert(photoColumns, f:column(column))
+    end
+    return f:column {
+        f:row(photoColumns),
+        caption,
+    }
+end
+
+-- Downloads and renders the observation's own iNat photo as a `picture`
+-- view (a plain file-path image control, unlike catalog_photo which only
+-- works for local Lightroom photos) -- lets the user visually compare
+-- against the local candidate(s) directly in the dialog, rather than
+-- needing "View on iNat" to open a browser for every candidate. Falls
+-- back to a text placeholder if the download failed (network, no photos
+-- on the observation, etc.) -- never blocks the dialog from showing.
+--
+-- Returns the view element AND the downloaded temp file's path (or nil if
+-- there wasn't one) -- the caller MUST remove that file once the dialog
+-- closes (see the cleanupINatThumbnail calls in resolveClusterManually/
+-- confirmNewLink), since these are one-shot fetches, not a cache.
+--
+-- Confirmed live: renders correctly.
+local function buildINatThumbnail(f, observation)
+    local tempPath = INaturalist.downloadObservationThumbnail(observation)
+    if tempPath then
+        return f:picture { value = tempPath, width = 150, height = 150, frame_width = 1 }, tempPath
+    end
+    return f:static_text { title = "(iNat photo unavailable)", width_in_chars = 22 }, nil
+end
+
+-- Best-effort cleanup for buildINatThumbnail's downloaded temp file --
+-- wrapped in pcall since a failure to delete a scratch temp file is not
+-- worth interrupting a sync run over.
+local function cleanupINatThumbnail(tempPath)
+    if tempPath then
+        pcall(os.remove, tempPath)
+    end
+end
+
+-- Presents one small dialog per still-ambiguous iNat observation in a
+-- collision cluster (more than one candidate group AND more than one
+-- candidate observation shared a capture time, with no existing tag to
+-- disambiguate automatically -- see INatSync.pullAndMatch). Anchored on
+-- the OBSERVATION (its species/common name + photo count, from
+-- describeObservation -- reported live that asking "which of these
+-- unlabeled iNat ids is this local photo?" was backwards from how the
+-- user actually thinks about it: "which of my local photos is THIS iNat
+-- post?"). Each dialog offers the remaining candidate LOCAL GROUPS (with
+-- thumbnails) as radio choices; picking one removes it from the pool
+-- offered to the next observation in the same cluster.
 --
 -- Returns resolvedPairs, unresolvedObservations, groupLabels. The second is
--- every observation still left in the pool once every group in the cluster
--- has either been matched or run out of candidates -- this includes
--- anything skipped via "Skip For Now". The caller MUST feed these into the
--- retry list (INatSync.markRetryOutcome) -- without that, a skipped
--- observation has no local match recorded and the `updated_since` cursor
--- still advances past it, so it would otherwise vanish rather than being
--- offered again next run (confirmed live: this was a real bug, not a
+-- every observation left over once every candidate group in the cluster
+-- has either been claimed or the pool ran out before reaching it -- this
+-- includes anything skipped via "Skip For Now". The caller MUST feed these
+-- into the retry list (INatSync.markRetryOutcome) -- without that, a
+-- skipped observation has no local match recorded and the `updated_since`
+-- cursor still advances past it, so it would otherwise vanish rather than
+-- being offered again next run (confirmed live: this was a real bug, not a
 -- hypothetical). `groupLabels` is every local candidate group's filenames
 -- (+ existing tag, if any) in the cluster (see describeCandidateGroups),
 -- for the caller to fold into the sync log.
 local function resolveClusterManually(cluster)
     local resolvedPairs = {}
-    local remainingObservations = {}
-    for _, obs in ipairs(cluster.observations) do
-        table.insert(remainingObservations, obs)
+    local remainingGroups = {}
+    for _, group in ipairs(cluster.groups) do
+        table.insert(remainingGroups, group)
     end
 
     local groupLabels = describeCandidateGroups(cluster.groups)
+    local labelForGroup = {}
+    for i, group in ipairs(cluster.groups) do
+        labelForGroup[group] = groupLabels[i]
+    end
+    local unresolvedObservations = {}
 
-    for groupIndex, group in ipairs(cluster.groups) do
-        if #remainingObservations == 0 then
-            break
-        end
+    for _, obs in ipairs(cluster.observations) do
+        if #remainingGroups == 0 then
+            table.insert(unresolvedObservations, obs)
+        else
+            local chosenIndex = nil
 
-        local groupLabel = groupLabels[groupIndex]
+            LrFunctionContext.callWithContext("INatCollisionResolve", function(context)
+                local props = LrBinding.makePropertyTable(context)
+                props.selectedIndex = 1
 
-        local chosenIndex = nil
+                local f = LrView.osFactory()
 
-        LrFunctionContext.callWithContext("INatCollisionResolve", function(context)
-            local props = LrBinding.makePropertyTable(context)
-            props.selectedIndex = 1
+                local candidateColumns = {}
+                for i, group in ipairs(remainingGroups) do
+                    local radio = f:radio_button {
+                        title = labelForGroup[group],
+                        value = LrView.bind("selectedIndex"),
+                        checked_value = i,
+                        width_in_chars = 22,
+                    }
+                    table.insert(candidateColumns, buildCandidateColumn(f, group, radio))
+                end
 
-            local f = LrView.osFactory()
+                local inatThumbnail, inatThumbnailTempPath = buildINatThumbnail(f, obs)
 
-            -- An actual thumbnail, not just the filename -- picking the
-            -- right observation requires seeing what's in the photo, and a
-            -- bare filename like "DSC_7378.NEF" doesn't help with that at
-            -- all. One catalog_photo view per photo in the group (usually
-            -- just one, but a group can be a whole identify batch).
-            --
-            -- A thumbnail can render blank/black with no explanation --
-            -- checkPhotoAvailability() (must be called from an async task,
-            -- which this already is) reports whether the file is
-            -- currently reachable, so a note can at least say *why*
-            -- instead of leaving an unexplained black box -- confirmed
-            -- live this happens for files on a currently-disconnected
-            -- external drive.
-            local thumbnails = {}
-            for _, photo in ipairs(group.photos) do
-                local column = {
-                    f:catalog_photo {
-                        photo = photo,
-                        width = 200,
-                        height = 200,
-                        frame_width = 1,
+                local contents = f:column {
+                    bind_to_object = props,
+                    spacing = f:control_spacing(),
+                    f:static_text { title = describeObservation(obs) },
+                    f:row {
+                        inatThumbnail,
+                        f:push_button {
+                            title = "View on iNat",
+                            action = function()
+                                LrHttp.openUrlInBrowser("https://www.inaturalist.org/observations/" .. tostring(obs.id))
+                            end,
+                        },
                     },
+                    f:static_text {
+                        title = "Several photos and iNat observations share a capture time.\n"
+                            .. "Which local photo is this?",
+                    },
+                    f:row(candidateColumns),
                 }
-                if not photo:checkPhotoAvailability() then
-                    table.insert(column, f:static_text {
-                        title = "(file not currently available -- on a disconnected drive?)",
-                        width_in_chars = 30,
-                    })
+
+                local result = LrDialogs.presentModalDialog {
+                    title = "Match iNat Observation",
+                    contents = contents,
+                    actionVerb = "Match",
+                    cancelVerb = "Skip For Now",
+                }
+
+                cleanupINatThumbnail(inatThumbnailTempPath)
+
+                if result == "ok" then
+                    chosenIndex = props.selectedIndex
                 end
-                table.insert(thumbnails, f:column(column))
+            end)
+
+            if chosenIndex then
+                table.insert(resolvedPairs, { group = remainingGroups[chosenIndex], observation = obs })
+                table.remove(remainingGroups, chosenIndex)
+            else
+                table.insert(unresolvedObservations, obs)
             end
-
-            local args = {
-                bind_to_object = props,
-                spacing = f:control_spacing(),
-                f:row(thumbnails),
-                f:static_text {
-                    title = "Several photos and iNat observations share a capture time.\n"
-                        .. "Which observation is:\n" .. groupLabel .. "?",
-                },
-            }
-            for i, obs in ipairs(remainingObservations) do
-                local label = "#" .. tostring(obs.id)
-                if obs.taxon then
-                    label = label .. " -- " .. (obs.taxon.preferred_common_name or obs.taxon.name)
-                        .. " (" .. obs.taxon.name .. ")"
-                end
-                local radio = f:radio_button {
-                    title = label,
-                    value = LrView.bind("selectedIndex"),
-                    checked_value = i,
-                    width_in_chars = 50,
-                }
-                -- Same per-row reference-link pattern as CandidatePicker.lua
-                -- -- lets you actually look at the observation on iNat
-                -- (photos, location, notes) before committing to a match,
-                -- rather than guessing from just the id/species name here.
-                local viewButton = f:push_button {
-                    title = "View on iNat",
-                    action = function()
-                        LrHttp.openUrlInBrowser("https://www.inaturalist.org/observations/" .. tostring(obs.id))
-                    end,
-                }
-                table.insert(args, f:row { radio, viewButton })
-            end
-
-            local result = LrDialogs.presentModalDialog {
-                title = "Match iNat Observation",
-                contents = f:column(args),
-                actionVerb = "Match",
-                cancelVerb = "Skip For Now",
-            }
-
-            if result == "ok" then
-                chosenIndex = props.selectedIndex
-            end
-        end)
-
-        if chosenIndex then
-            table.insert(resolvedPairs, { group = group, observation = remainingObservations[chosenIndex] })
-            table.remove(remainingObservations, chosenIndex)
         end
     end
 
-    return resolvedPairs, remainingObservations, groupLabels
+    return resolvedPairs, unresolvedObservations, groupLabels
+end
+
+-- Confirms a brand-new iNat link before it's applied, even when the match
+-- itself is unambiguous -- requested explicitly ("show the confirmation
+-- even if we feel good about the match") so a mistake in the underlying
+-- time-correlation logic gets caught before anything is written, not
+-- after. The caller is responsible for only calling this for first-time
+-- links (group.iNatObservationId == nil) -- an already-linked observation
+-- being routinely re-verified every run must stay silent, or every
+-- regular Sync would turn back into a full manual review. No bulk-accept
+-- escape hatch (unlike the merge-candidates picker's "Skip All
+-- Remaining") -- explicitly not wanted; every first-time link gets its
+-- own confirmation, every run.
+--
+-- Returns "confirmed" or "skipped".
+local function confirmNewLink(match)
+    local outcome = "skipped"
+
+    LrFunctionContext.callWithContext("INatConfirmNewLink", function(context)
+        local f = LrView.osFactory()
+
+        -- The full description is a top-level, unconstrained static_text
+        -- (same as resolveClusterManually's header) -- NOT the narrow
+        -- 22-char-wide caption buildCandidateColumn otherwise uses for a
+        -- short per-candidate label sitting next to a thumbnail, which cut
+        -- this off mid-sentence (confirmed live: "Link this photo to
+        -- #368726410 --" with nothing after it).
+        local filenameLabel = f:static_text {
+            title = describeCandidateGroups({ match.group })[1],
+            width_in_chars = 22,
+        }
+
+        local inatThumbnail, inatThumbnailTempPath = buildINatThumbnail(f, match.observation)
+
+        local contents = f:column {
+            spacing = f:control_spacing(),
+            f:static_text { title = "Link this photo to " .. describeObservation(match.observation) .. "?" },
+            f:row {
+                inatThumbnail,
+                f:push_button {
+                    title = "View on iNat",
+                    action = function()
+                        LrHttp.openUrlInBrowser("https://www.inaturalist.org/observations/" .. tostring(match.observation.id))
+                    end,
+                },
+            },
+            f:row { buildCandidateColumn(f, match.group, filenameLabel) },
+        }
+
+        local result = LrDialogs.presentModalDialog {
+            title = "Confirm New iNat Link",
+            contents = contents,
+            actionVerb = "Confirm",
+            cancelVerb = "Skip For Now",
+        }
+
+        cleanupINatThumbnail(inatThumbnailTempPath)
+
+        if result == "ok" then
+            outcome = "confirmed"
+        end
+    end)
+
+    return outcome
 end
 
 -- Short, generic mismatch description (no filenames) -- used both for the
@@ -373,6 +502,10 @@ local function formatSummary(counts, mismatches, logPath, fullLogPath)
     if counts.unresolvedCollisions > 0 then
         table.insert(parts, counts.unresolvedCollisions .. " left unresolved (skipped in the match dialog)")
     end
+    if counts.skippedNewLinkConfirmation > 0 then
+        table.insert(parts, counts.skippedNewLinkConfirmation .. " new link" .. (counts.skippedNewLinkConfirmation == 1 and "" or "s")
+            .. " skipped at confirmation -- will offer again next time")
+    end
     if counts.absorbedSiblings > 0 then
         table.insert(parts, counts.absorbedSiblings .. " untagged sibling photo" .. (counts.absorbedSiblings == 1 and "" or "s")
             .. " found elsewhere in the catalog and linked into an existing observation")
@@ -528,7 +661,7 @@ function INatSyncRunner.run(options)
             end
 
             for _, obs in ipairs(report.noLocalMatchObservations) do
-                logObservation(obs, "no_local_match")
+                logObservation(obs, "no_local_match", report.noLocalMatchReasons[obs.id])
             end
 
             local allMatches = {}
@@ -550,11 +683,12 @@ function INatSyncRunner.run(options)
                     -- this matters.
                     for _, obs in ipairs(unresolvedObservations) do
                         INatSync.markRetryOutcome(obs.id, false)
-                        logObservation(
-                            obs, "unresolved_collision",
-                            "skipped in the match dialog -- candidate local photo(s) in this cluster: "
-                                .. table.concat(groupLabels, "; ")
-                        )
+                        local detail = "skipped in the match dialog -- candidate local photo(s) in this cluster: "
+                            .. table.concat(groupLabels, "; ")
+                        if cluster.claimedAwayReason then
+                            detail = detail .. " -- also already claimed this run: " .. cluster.claimedAwayReason
+                        end
+                        logObservation(obs, "unresolved_collision", detail)
                     end
                     unresolvedCollisions = unresolvedCollisions + (#cluster.groups - #resolved)
                 end
@@ -566,11 +700,12 @@ function INatSyncRunner.run(options)
                     local groupLabels = describeCandidateGroups(cluster.groups)
                     for _, obs in ipairs(cluster.observations) do
                         INatSync.markRetryOutcome(obs.id, false)
-                        logObservation(
-                            obs, "unresolved_collision",
-                            "run canceled before manual resolution -- candidate local photo(s) in this cluster: "
-                                .. table.concat(groupLabels, "; ")
-                        )
+                        local detail = "run canceled before manual resolution -- candidate local photo(s) in this cluster: "
+                            .. table.concat(groupLabels, "; ")
+                        if cluster.claimedAwayReason then
+                            detail = detail .. " -- also already claimed this run: " .. cluster.claimedAwayReason
+                        end
+                        logObservation(obs, "unresolved_collision", detail)
                     end
                     unresolvedCollisions = unresolvedCollisions + #cluster.groups
                 end
@@ -579,7 +714,7 @@ function INatSyncRunner.run(options)
             local counts = {
                 applied = 0, linkedOnly = 0, repairedAncestry = 0, skippedDisagreement = 0, failed = 0,
                 noLocalMatch = #report.noLocalMatchObservations, unresolvedCollisions = unresolvedCollisions,
-                absorbedSiblings = 0, resolvedViaMergeDialog = 0,
+                absorbedSiblings = 0, resolvedViaMergeDialog = 0, skippedNewLinkConfirmation = 0,
             }
             local mismatches = {}
             local canceledDuringApply = false
@@ -607,86 +742,107 @@ function INatSyncRunner.run(options)
                 progressScope:setCaption("Applying: " .. tostring(match.observation.taxon and match.observation.taxon.name or match.observation.id))
                 progressScope:setPortionComplete(i - 1, #allMatches)
 
-                local forceRecheck = options.forceRecheckAll or pendingMismatchLookup[match.observation.id]
-                local applyOk, result = LrTasks.pcall(
-                    INatSync.applyMatch, match.group, match.observation, username, lastSyncTime,
-                    report.photosByFilename, forceRecheck, report.untaggedSingletonsSortedByTime
-                )
+                -- Confirming even a "we feel good about it" unambiguous
+                -- match, but ONLY the first time a photo is linked to a
+                -- given observation -- an already-linked observation being
+                -- routinely re-verified every run should stay silent and
+                -- fast, or every regular Sync would turn back into a full
+                -- manual review. No bulk-accept escape hatch -- explicitly
+                -- not wanted; every first-time link gets its own
+                -- confirmation, every run.
+                local shouldApply = true
+                if match.group.iNatObservationId == nil then
+                    local confirmOutcome = confirmNewLink(match)
+                    if confirmOutcome == "skipped" then
+                        shouldApply = false
+                        counts.skippedNewLinkConfirmation = counts.skippedNewLinkConfirmation + 1
+                        INatSync.markRetryOutcome(match.observation.id, false)
+                        logObservation(match.observation, "skipped_new_link_confirmation")
+                    end
+                end
 
-                if applyOk then
-                    INatSync.markRetryOutcome(match.observation.id, true)
-                    counts[result.status] = (counts[result.status] or 0) + 1
-                    counts.absorbedSiblings = counts.absorbedSiblings + (result.absorbedCount or 0)
-                    if result.mismatch then
-                        -- Only worth offering the interactive picker when
-                        -- iNat has photos we don't -- local-has-more is
-                        -- normal, not actionable (see candidateDiffersFromLocal
-                        -- comment / project memory), and there's no
-                        -- "missing" photo to go looking for in that case.
-                        local worthOffering = (result.mismatch.missingLocally and #result.mismatch.missingLocally > 0)
-                            or result.mismatch.countMismatch ~= nil
-                        local resolvedInteractively = false
+                if shouldApply then
+                    local forceRecheck = options.forceRecheckAll or pendingMismatchLookup[match.observation.id]
+                    local applyOk, result = LrTasks.pcall(
+                        INatSync.applyMatch, match.group, match.observation, username, lastSyncTime,
+                        report.photosByFilename, forceRecheck, report.untaggedSingletonsSortedByTime
+                    )
 
-                        if worthOffering and not skipAllRemainingMismatchDialogs then
-                            local master = match.group.photos[1]
-                            local masterObservationId = master:getPropertyForPlugin(_PLUGIN, "observationId")
-                            local beforeEntries, afterEntries, masterTime =
-                                MergeCandidatesDialog.buildCandidateWindow(catalog, master, masterObservationId)
+                    if applyOk then
+                        INatSync.markRetryOutcome(match.observation.id, true)
+                        counts[result.status] = (counts[result.status] or 0) + 1
+                        counts.absorbedSiblings = counts.absorbedSiblings + (result.absorbedCount or 0)
+                        if result.mismatch then
+                            -- Only worth offering the interactive picker when
+                            -- iNat has photos we don't -- local-has-more is
+                            -- normal, not actionable (see candidateDiffersFromLocal
+                            -- comment / project memory), and there's no
+                            -- "missing" photo to go looking for in that case.
+                            local worthOffering = (result.mismatch.missingLocally and #result.mismatch.missingLocally > 0)
+                                or result.mismatch.countMismatch ~= nil
+                            local resolvedInteractively = false
 
-                            if beforeEntries and MergeCandidatesDialog.hasEligibleCandidate(beforeEntries, afterEntries) then
-                                progressScope:setCaption(
-                                    "Reviewing photo-count mismatch: " .. tostring(match.observation.taxon and match.observation.taxon.name or match.observation.id)
-                                )
-                                local outcome, mergedPhotos = MergeCandidatesDialog.presentAndMerge {
-                                    catalog = catalog, master = master,
-                                    beforeEntries = beforeEntries, afterEntries = afterEntries, masterTime = masterTime,
-                                    allowSkipAll = true,
-                                }
-                                if outcome == "merged" then
-                                    resolvedInteractively = true
-                                    counts.resolvedViaMergeDialog = counts.resolvedViaMergeDialog + 1
-                                    counts.absorbedSiblings = counts.absorbedSiblings + #mergedPhotos
-                                elseif outcome == "skipAll" then
-                                    skipAllRemainingMismatchDialogs = true
+                            if worthOffering and not skipAllRemainingMismatchDialogs then
+                                local master = match.group.photos[1]
+                                local masterObservationId = master:getPropertyForPlugin(_PLUGIN, "observationId")
+                                local beforeEntries, afterEntries, masterTime =
+                                    MergeCandidatesDialog.buildCandidateWindow(catalog, master, masterObservationId)
+
+                                if beforeEntries and MergeCandidatesDialog.hasEligibleCandidate(beforeEntries, afterEntries) then
+                                    progressScope:setCaption(
+                                        "Reviewing photo-count mismatch: " .. tostring(match.observation.taxon and match.observation.taxon.name or match.observation.id)
+                                    )
+                                    local outcome, mergedPhotos = MergeCandidatesDialog.presentAndMerge {
+                                        catalog = catalog, master = master,
+                                        beforeEntries = beforeEntries, afterEntries = afterEntries, masterTime = masterTime,
+                                        allowSkipAll = true,
+                                    }
+                                    if outcome == "merged" then
+                                        resolvedInteractively = true
+                                        counts.resolvedViaMergeDialog = counts.resolvedViaMergeDialog + 1
+                                        counts.absorbedSiblings = counts.absorbedSiblings + #mergedPhotos
+                                    elseif outcome == "skipAll" then
+                                        skipAllRemainingMismatchDialogs = true
+                                    end
                                 end
                             end
-                        end
 
-                        if not resolvedInteractively then
-                            table.insert(mismatches, {
-                                observationId = match.observation.id,
-                                url = "https://www.inaturalist.org/observations/" .. tostring(match.observation.id),
-                                mismatch = result.mismatch,
-                                photos = collectPhotoDetails(match.group.photos),
-                            })
-                        end
+                            if not resolvedInteractively then
+                                table.insert(mismatches, {
+                                    observationId = match.observation.id,
+                                    url = "https://www.inaturalist.org/observations/" .. tostring(match.observation.id),
+                                    mismatch = result.mismatch,
+                                    photos = collectPhotoDetails(match.group.photos),
+                                })
+                            end
 
-                        -- Reflects whether it's STILL mismatched after the
-                        -- interactive resolution attempt above, not the
-                        -- pre-resolution state from applyMatch alone --
-                        -- otherwise something just fixed this run would
-                        -- incorrectly stay on the pending list forever.
-                        if result.checkedMismatch then
-                            INatSync.markMismatchOutcome(match.observation.id, not resolvedInteractively)
-                        end
+                            -- Reflects whether it's STILL mismatched after the
+                            -- interactive resolution attempt above, not the
+                            -- pre-resolution state from applyMatch alone --
+                            -- otherwise something just fixed this run would
+                            -- incorrectly stay on the pending list forever.
+                            if result.checkedMismatch then
+                                INatSync.markMismatchOutcome(match.observation.id, not resolvedInteractively)
+                            end
 
-                        logObservation(
-                            match.observation, result.status,
-                            resolvedInteractively and "mismatch resolved via merge picker"
-                                or "mismatch: " .. (result.mismatch.countMismatch
-                                    and string.format("iNat has %d, local has %d", result.mismatch.countMismatch.iNatCount, result.mismatch.countMismatch.localCount)
-                                    or table.concat(result.mismatch.missingLocally or {}, ", "))
-                        )
+                            logObservation(
+                                match.observation, result.status,
+                                resolvedInteractively and "mismatch resolved via merge picker"
+                                    or "mismatch: " .. (result.mismatch.countMismatch
+                                        and string.format("iNat has %d, local has %d", result.mismatch.countMismatch.iNatCount, result.mismatch.countMismatch.localCount)
+                                        or table.concat(result.mismatch.missingLocally or {}, ", "))
+                            )
+                        else
+                            if result.checkedMismatch then
+                                INatSync.markMismatchOutcome(match.observation.id, false)
+                            end
+                            logObservation(match.observation, result.status)
+                        end
                     else
-                        if result.checkedMismatch then
-                            INatSync.markMismatchOutcome(match.observation.id, false)
-                        end
-                        logObservation(match.observation, result.status)
+                        INatSync.markRetryOutcome(match.observation.id, false)
+                        counts.failed = counts.failed + 1
+                        logObservation(match.observation, "failed", tostring(result))
                     end
-                else
-                    INatSync.markRetryOutcome(match.observation.id, false)
-                    counts.failed = counts.failed + 1
-                    logObservation(match.observation, "failed", tostring(result))
                 end
             end
 

@@ -1139,6 +1139,535 @@ cases, since this test only used to check the retry list) and reads the
 actual log file back off disk to confirm both filenames appear in the
 unresolved-collision entries.
 
+## Collision dialog flipped to anchor on the observation; new-link confirmation added (2026-07-24)
+
+Design discussion (not a live bug report this time): the collision-
+resolution dialog asked "here's a local photo, which of these iNat ids is
+it?" -- backwards from how the user actually thinks about it ("I have this
+specific iNat post, which of my local photos is it?"), and left the iNat
+side as a bare text label (species name only), requiring a "View on iNat"
+click just to see anything concrete about each candidate.
+
+`resolveClusterManually` (INatSyncRunner.lua) now iterates
+`cluster.observations` as the outer loop instead of `cluster.groups`,
+presenting each observation's own `describeObservation` header ("#id --
+common name (scientific name) -- N photo(s)", built entirely from data
+already in the pulled observation object -- no extra fetch) and offering
+the remaining candidate LOCAL groups (with thumbnails, same
+`catalog_photo` treatment as before) as the radio choices. `groupLabels`/
+`labelForGroup` unchanged in spirit -- just no longer tied to loop order,
+since groups now get removed from the pool as they're claimed rather than
+observations. Deliberately kept text-only (no downloaded iNat photo) for
+now -- explicitly requested, given the photo-count is already reliable and
+free, whereas fetching iNat's own image would need a temp-file download
+per candidate shown.
+
+Separately, added a NEW confirmation dialog for brand-new links: even an
+unambiguous, high-confidence match now gets a "Link this photo to #id --
+common name (N photos)?" confirmation before being applied, requested
+explicitly ("show the confirmation even if we feel good about the
+match"). Scoped to first-time links only
+(`match.group.iNatObservationId == nil`) -- an already-linked observation
+being routinely re-verified every run skips it entirely, or every regular
+Sync would turn back into a full manual review. "Skip For Now" leaves the
+match unapplied and adds it to the retry list (same treatment as a skipped
+collision, so it's offered again next run regardless of the cursor). A
+Full Sync can surface hundreds of first-time links in one run (confirmed
+live: 712 in one real run), so this dialog also has an "Accept All
+Remaining" escape hatch (`acceptAllRemainingNewLinks`), same pattern as
+`skipAllRemainingMismatchDialogs` for the merge-candidates picker --
+confirming (or accepting-all) the current match, then silently applying
+everything else the rest of the run.
+
+`describeObservation` and the candidate-column builder (`buildCandidateColumn`)
+are shared between the collision dialog and the new confirmation dialog,
+since both need the same "show local photos + describe the iNat
+observation" building blocks.
+
+Layout follow-up, same session: the first version stacked each candidate
+as its own full-width 200x200 block (thumbnail row, then a radio button
+below it), one after another -- fine for one or two candidates, but grew
+unbounded and routinely overflowed the screen for a cluster with more than
+a couple. Reworked to match `MergeCandidatesDialog.lua`'s existing
+layout instead (explicitly requested: "let's do the same photo layout as
+in the other matching dialog") -- `buildCandidateColumn` now builds ONE
+column per candidate (150x150 thumbnail(s), matching MergeCandidatesDialog's
+own size, plus a 22-char-wide caption underneath, same as its
+`buildNeighborColumn`), and all of a cluster's candidate columns get
+placed side by side in a single `f:row(...)`, horizontally, instead of
+stacked vertically.
+
+New count bucket `counts.skippedNewLinkConfirmation`, surfaced in the
+closing summary ("N new link(s) skipped at confirmation -- will offer
+again next time").
+
+Regression tests: `mock_test_sync_merge_integration.lua` Case 7 covers the
+new confirmation dialog directly -- "Skip For Now" leaves a fresh link
+unapplied and retry-listed (Case 7a), "Accept All Remaining" confirms the
+current match and silently applies a second first-time link with no
+second dialog (Case 7b). Needed two supporting mock fixes: the shared
+`presentModalDialog` stub now distinguishes this dialog from the merge-
+candidates picker by title (previously one shared counter, which would've
+made every existing case's dialog-count assertions wrong now that every
+scenario in that file involves a first-time link); and the mock's
+`LrHttp.get` gained a real `?id=` handler (previously any retry-list
+re-fetch silently returned empty results) so Case 7b's retry-listed
+observation is actually re-fetched on the second run, not just
+state-checked. That fix exposed a latent cross-case coupling in the test
+file itself -- Cases 2 and 5 deliberately leave observations on
+`iNatPendingMismatchIds`, which (now that `?id=` actually resolves) would
+otherwise get force-re-pulled into Cases 3 and 7 and reopen their own
+unrelated picker dialogs; both now explicitly reset
+`iNatPendingMismatchIds`/`iNatPendingRetryIds` before they run.
+
+## Same-scientific-name-and-day widening for camera-clock-skew rescue (2026-07-24)
+
+Direct follow-up to the timezone diagnosis two sections back (the Nikon
+D50 whose clock was never adjusted for a Montana trip). Explicitly
+requested: "include any photos with the same scientific name and date as
+the observation -- these photos are all already tagged." A photo whose
+true capture time is hours off from what iNat reports falls outside even
+`TRUNCATED_TOLERANCE_SECONDS` (60s), so it silently becomes
+`noLocalMatchObservations` despite already carrying the exact right
+identification from a prior identify pass.
+
+`buildLocalIndex` (INatSync.lua) now also returns `groupsByScientificName`
+(every already-tagged group, keyed by name) alongside its existing
+indexes. In `pullAndMatch`, if the primary time-window search finds
+ZERO candidates for an observation, `widenCandidatesByScientificName`
+looks up that table for groups sharing the observation's `taxon.name`
+AND calendar day (via a new `dateOnly` helper -- `LrDate.timeToW3CDate`
+truncated to its first 10 characters, a deliberately loose comparison
+since the whole point is tolerating a capture time that's hours off
+true).
+
+**Deliberately scoped as a fallback only** -- widening only runs when
+`#candidateGroups == 0` from the time window, never added on top of an
+already-successful match. Tried it unscoped first and immediately broke
+several existing regression tests: an observation that already had a
+clean single time-based candidate would get OTHER unrelated
+same-species-same-day groups tacked on as extra "candidates" purely
+because they happened to share a name and land within a day of each
+other, turning a working match into a spurious collision. Scoping to
+"only when time-based search found nothing at all" fixed all of it and
+is also the more conservative, less risky behavior for real usage --
+this never second-guesses a match the time window already got right.
+
+**Found and fixed a real latent bug in `pairByScientificName` along the
+way**: it paired a candidate group to an observation whenever the group's
+name matched exactly one STILL-UNMATCHED observation, but never checked
+whether OTHER candidate groups also shared that same name. With the
+widening now able to surface multiple same-day, same-name groups for a
+single observation, the old greedy loop would silently pair the
+observation to whichever group came first in iteration order and just
+drop the others -- no manual-resolution surfacing, no log entry, nothing.
+Fixed by requiring a group's name to also be unique among the OTHER
+candidate groups being considered before trusting it for auto-resolution
+(`groupCountByName`) -- ambiguous cases now correctly fall through to
+`toResolveManually` instead, where the (recently flipped) collision
+dialog offers all of them as candidates for the user to pick from.
+
+Regression tests: `mock_test_inatsync.lua` Cases 12a/b/c, added on a
+dedicated, disconnected calendar day (`fakeTime(2024, 8, 1/5/10, ...)`)
+specifically so they can't accidentally collide with any of this file's
+many pre-existing same-species fixtures elsewhere in its shared
+timeline. 12a: a single same-day candidate 4 hours off gets rescued into
+`toApply`. 12b: two same-day candidates correctly become a genuine
+`toResolveManually` cluster (both offered), not a silent pick of one.
+12c: same scientific name but a DIFFERENT calendar day stays unmatched --
+confirms the date actually gets checked, not just the name. Needed a
+supporting mock fix: this test file's `LrDate.timeToW3CDate` stub had
+always returned a single hardcoded constant regardless of input (harmless
+before this feature existed, since nothing compared dates), which would
+have made every group look like the same day as every observation --
+replaced with a real conversion mirroring the file's own `isoFor`
+convention.
+
+## Sync dialogs audited for "View on iNat" links (2026-07-24)
+
+Requested as a standing check ("if the dialog does not have a link to the
+iNat page it should"), not a specific reported gap. Audited all three
+dialogs shown during a sync run: the collision-resolution dialog and the
+new-link confirmation dialog (both in INatSyncRunner.lua) and the
+merge-candidates picker (MergeCandidatesDialog.lua) -- all three already
+include a "View on iNat" button/link (as does the mismatch HTML log's
+per-entry link). Nothing needed changing; noted here so this doesn't get
+re-litigated as an open question later.
+
+## Traceable "no local match" reasons for claimed-away candidates (2026-07-24)
+
+Reported live: observation #384538806 (`Cirsium hookerianum`) should have
+matched IMG_1309/1310/1311 -- all three already correctly tagged, no
+`iNatObservationId` yet, no `iNatObservationId` conflict. Isolated
+reproduction of the matching code against just these photos and this one
+observation succeeded under every plausible timezone assumption (Mountain,
+Eastern, raw UTC), so the algorithm wasn't wrong in isolation. The real
+run's log held the actual clue: a *different* observation
+(`#384538787`, a plant) had been offered squirrel-tagged photos
+(`Urocitellus columbianus`) as candidates -- clear evidence of `claimedGroups`
+cross-contamination, where an earlier-processed, completely unrelated
+observation finds the same local group via pure time proximity (no
+species check at that stage) and silently claims it before the correct
+observation gets its turn. `claimedGroups` has existed since the original
+"beetle incident" fix, but only ever recorded *that* something was
+claimed, never *what* claimed it -- so this specific failure mode was
+real but had no way to be confirmed or traced, just theorized.
+
+Fix: `claimedGroups[group]` now stores the claiming observation itself
+(previously just `true`) at all three assignment sites (fast path,
+unambiguous single candidate, resolved collision pairs). Both places a
+group gets excluded because it's already claimed -- the primary
+time-window filter and `widenCandidatesByScientificName`'s same-day
+fallback (which now also returns a `claimedAway` list alongside the
+widened candidates) -- feed into a new `noLocalMatchReasons` table
+(keyed by observation id), populated only when a "no local match" outcome
+was actually caused by a lost race for a specific candidate, naming both
+the claimed local filename(s) and the id/taxon of whichever observation
+won it. `INatSyncRunner.run` passes this through to `logObservation` as
+the detail string for `no_local_match` entries, so the *next* real run
+against this exact case will show definitively (rather than
+theoretically) who claimed IMG_1309-1311, if it's still contested.
+
+This is diagnostic infrastructure, same spirit as the full per-observation
+sync log -- it doesn't fix the underlying race (an unambiguous single-
+candidate match still has no species cross-check, which is the actual
+root cause), just makes it traceable instead of a silent, unexplained
+"no local match." Whether to also add a species check to the unambiguous
+fast path itself is a separate, not-yet-made decision -- doing so would
+change the meaning of "unambiguous" for every existing untagged-photo
+historical-backfill match too, where there's no species to check against.
+
+Regression test: `mock_test_inatsync.lua` Case 12d reproduces the exact
+shape live -- one local group sitting between two observations, both
+within the wide truncated tolerance of it (one unrelated, processed
+first in pull order, claims it via pure time proximity; one genuinely
+matching by scientific name, processed second, finds nothing). Confirms
+the second observation lands in `noLocalMatchObservations` with a
+`noLocalMatchReasons` entry naming the actual claimed filename and the
+specific claiming observation's id and taxon.
+
+**Live-run follow-up, same day**: the feature worked -- a real Full Sync
+correctly linked IMG_1309/1310/1311 to #384538806 -- but surfaced a
+cosmetic bug in two OTHER genuine claimed-away cases: the same filename
+appeared twice, back to back, joined by "; " (e.g. "DSC_5586.NEF already
+claimed this run by #170277039 (Sphyrapicus varius); DSC_5586.NEF already
+claimed this run by #170277039 (Sphyrapicus varius)"). Cause: a group
+that's BOTH within the primary time window AND matches by scientific
+name gets excluded (and recorded into `claimedAway`) at the primary-window
+step, then found AGAIN by the widening fallback's own scan (whose dedup,
+`alreadyCandidate`, only covers groups that made it into `candidateGroups`
+-- a claimed-away group never does, so it's not protected against being
+re-found and re-recorded). Fixed by deduplicating by group identity when
+building the final reason string, rather than threading shared
+already-recorded state through both collection sites. Confirmed
+Case 12e's own fixture (photoStolen sits within both obsRescued's primary
+window AND the widening lookup) already exercised this exact duplication
+-- strengthened its assertion to check the filename appears exactly once,
+verified it fails against the pre-fix code and passes with the fix.
+(Renumbered from 12d to 12e when the midnight-crossing test below was
+inserted ahead of it.)
+
+## Same-day widening compared rendered dates, not absolute time (2026-07-24)
+
+Same live investigation, next observation over: #384538778 (`Ursus
+americanus`, a black bear) still showed `no_local_match` with no
+`claimedAway` reason at all -- genuinely zero candidates, not a lost
+race. Direct SQLite check found the obvious match sitting right there:
+`IMG_0642.JPG`, already tagged `Ursus americanus`, captured at
+`17:52:09`-ish local time, essentially identical to the observation's own
+`18:22:00-06:00`. Reproduced in isolation under three timezone
+assumptions for the local photo's Cocoa-epoch value (Mountain, Eastern,
+raw UTC) -- Mountain matched via the primary time window outright (so
+never needed the fallback), but BOTH Eastern and UTC failed even the
+same-day widening fallback outright, which was surprising since the
+species name matched exactly.
+
+Root cause: the observation's own true absolute instant is
+`2010-07-21T00:22:00Z` -- `18:22 Mountain` plus the `+6h` offset crosses
+midnight into the NEXT day. The old `dateOnly()` helper rendered THIS
+already-offset-corrected absolute instant via `LrDate.timeToW3CDate` and
+compared its "YYYY-MM-DD" prefix against the local photo's own rendered
+date -- under the Eastern/UTC assumptions, the photo's absolute instant
+(correctly, for an 18:22 local reading under those offsets) stays on
+`2010-07-20`, one day EARLIER than the observation's midnight-crossed
+`2010-07-21`. Two photos of the same real moment, genuinely close in
+absolute time, compared as different calendar dates purely because of
+where the day boundary happened to fall for each side's own (possibly
+wrong) offset assumption.
+
+Fixed by abandoning rendered-date-string comparison entirely.
+`widenCandidatesByScientificName` now compares `g.time` and `targetTime`
+(both already-absolute Cocoa-epoch numbers) directly:
+`math.abs(g.time - targetTime) <= SAME_DAY_WIDENING_TOLERANCE_SECONDS`
+(86400, i.e. 24 hours) -- a pure arithmetic comparison with no rendering,
+no timezone assumptions, and therefore no day-boundary edge case at all.
+24 hours comfortably covers every clock-skew magnitude actually seen live
+(2-6 hours) without depending on how any particular date string would
+have rendered. `dateOnly()` and its `LrDate.timeToW3CDate`-based
+`DEVELOPMENT_NOTES` framing are gone -- the comparison no longer
+involves "calendar day" as a rendered concept at all, just absolute
+closeness in time.
+
+Regression test: `mock_test_inatsync.lua` Case 12d -- a photo at Aug 15
+23:30 and an observation at Aug 16 00:30, exactly 1 hour apart in
+absolute terms but on different rendered calendar dates. Also widened
+Case 12c's negative control (previously exactly 24 hours apart, sitting
+right at the new tolerance's boundary) to a full 2 days, so it stays a
+genuinely unambiguous "too far apart" case regardless of exactly how the
+boundary is handled.
+
+## Claimed-away tracing extended to collisions, not just no-match (2026-07-24)
+
+Same live investigation, next straggler: observation #384538787 ("bracted
+lousewort") landed in `unresolved_collision` offering only unrelated
+squirrel-tagged photos -- but the user confirmed the actual correct match
+(`IMG_0680.JPG`) is already tagged with the exact right species and sits
+9 seconds from the observation's stated time. Reproduced in isolation
+against just this one photo/observation pair under four different
+timezone assumptions (Mountain, Eastern, Pacific, UTC) -- all four
+matched cleanly, ruling out a per-photo timezone issue with this file
+specifically. That means the real run's failure is almost certainly the
+same `claimedGroups` race diagnosed for the bear/thistle cases -- except
+here it manifests as a genuine COLLISION (other, wrong candidates still
+exist) rather than a clean "no local match," so the existing
+`noLocalMatchReasons` diagnostic (only ever populated on the
+`#candidateGroups == 0` path) never got a chance to fire and explain it.
+
+Fix: extracted the reason-building logic (previously inlined only for
+the no-match case, including its own dedup-by-group-identity handling)
+into a shared `describeClaimedAway(claimedAway)` helper. `pullAndMatch`'s
+collision branch now also calls it and attaches the result as
+`claimedAwayReason` on the `toResolveManually` cluster whenever a
+candidate was excluded there too (both the "canceled before resolution"
+and normal skip-path logging in `INatSyncRunner.run` append it to the
+`unresolved_collision` log detail when present). So a collision that's
+missing its obviously-correct candidate now says so explicitly, rather
+than just showing whichever wrong candidates happen to remain.
+
+Regression test: `mock_test_inatsync.lua` Case 12f -- an unrelated
+observation claims the correct, already-tagged candidate first (same
+"stealer" shape as Case 12e), but this time two OTHER untagged candidates
+also genuinely fall within the target observation's window, so it lands
+in `toResolveManually` instead of `noLocalMatchObservations`. Confirms
+the cluster's own candidate list correctly omits the claimed photo while
+still offering the two wrong ones, and that `claimedAwayReason` names both
+the claimed filename and the specific claiming observation. (Building
+this test surfaced its own arithmetic trap: the fixture's times need to
+each independently land on a `:00` **second** boundary to get the wide
+truncated tolerance -- an offset that's merely "a clean multiple of 60
+seconds from another already-aligned time" isn't sufficient on its own if
+a further +/-30s adjustment is then applied on top, since that shifts the
+result off the boundary again.)
+
+## Same-scientific-name widening: removed the time bound entirely (2026-07-24)
+
+Follow-up investigation on #384538787's lousewort case: isolated reproduction
+of just IMG_0680.JPG against the observation succeeded under four different
+timezone assumptions, ruling out a per-photo Lightroom quirk with that
+specific file. A fuller reproduction (adding the real squirrel group and
+its own observation, including its unusual `-08:00` stated offset) also
+failed to reproduce the miss. Rather than keep chasing an increasingly
+elaborate reproduction without live Lightroom access to the actual
+per-photo timezone assignment, the user's call: stop trying to widen the
+tolerance to exactly the right amount, since there may not BE a single
+right amount -- a camera/Lightroom timezone problem can put a genuinely
+correct match arbitrarily far away in absolute time, with no reliable
+bound to guess.
+
+The key realization (explicitly the user's): the earlier objection to
+"just match on scientific name" -- that a species seen twice breaks
+date-based matching -- only bites when just ONE of the two sightings falls
+inside whatever window is chosen, silently resolving to it. If the window
+is wide enough that BOTH sightings always show up together, that's not a
+silent wrong pick anymore, it's a normal collision the user resolves by
+hand (exactly the design already in place for a real, live example: the
+spittlebug case, #368726410, discussed the same session). So: remove the
+time bound entirely, accept that the tradeoff is now "always a visible
+collision instead of possibly no match at all," and let the user pick.
+
+Changed `widenCandidatesByScientificName`: previously bounded by
+`SAME_DAY_WIDENING_TOLERANCE_SECONDS` (86400s -- itself already a
+replacement for an even earlier, buggier calendar-date-string comparison),
+now checks only `not already a candidate` and `not already claimed` --
+ANY already-tagged group sharing the observation's scientific name,
+anywhere in the catalog's history, becomes a candidate once the primary
+time window has found nothing. Still strictly a fallback (never runs when
+the time window already found something), and `pairByScientificName`'s
+existing `groupCountByName` uniqueness check (from the earlier
+claimed-away work) already ensures multiple same-named candidates surface
+as a genuine `toResolveManually` collision rather than a greedy wrong
+pick -- no changes needed there, that safety net was already in place.
+
+Regression tests: `mock_test_inatsync.lua` Cases 12a-12c needed
+restructuring, since with no time bound at all, several fixtures that
+previously used the SAME placeholder species name (relying on the 24-hour
+window to keep them from interfering with each other) now collide with
+one another for real. Gave Cases 12a/12b/12c their own distinct species
+names ("Testudo timezoneus" / "Testudo ambiguous" / "Testudo distantus"),
+and flipped Case 12c from a negative control ("different day must NOT
+match") into its logical opposite ("10 days apart must STILL match, since
+there's no longer any bound to fail on"). Case 12d (the midnight-crossing
+fix) still passes but is now redundant with the design itself -- kept for
+historical regression coverage since it costs nothing to leave in.
+
+## Widening: reintroduced a (smaller) time bound -- 12 hours (2026-07-24)
+
+Immediate walk-back of the "no bound at all" decision two sections above,
+same conversation. Reconsidered: unbounded is more permissive than the
+actual problem needs -- the confirmed clock-skew magnitudes seen live all
+season were 2-6 hours, and an unbounded search risks a large, unwieldy
+candidate list for any species photographed many times across the whole
+catalog's history (not just within one trip). Reintroduced a bound,
+renamed `WIDENING_TIME_TOLERANCE_SECONDS` (was
+`SAME_DAY_WIDENING_TOLERANCE_SECONDS`, before that removed entirely) and
+set to 12 hours -- comfortably covers every real case confirmed so far
+while still being narrow enough that two genuinely unrelated sightings of
+a common species on different days usually won't both qualify.
+
+The core insight from the "no bound" discussion still stands and didn't
+need reverting: the risk being traded away (multiple same-named
+candidates) was already made safe by the EARLIER `pairByScientificName`
+`groupCountByName` fix -- ambiguous cases surface as a normal collision for
+manual resolution, never a silent wrong pick. Only the WIDTH of the
+window changed, not the safety mechanism.
+
+Regression tests: `mock_test_inatsync.lua` Case 12c flipped back to a
+negative control (same species, 20 hours apart -- comfortably beyond the
+12-hour window, not just at its boundary -- correctly stays unmatched),
+renamed `photoClockSkewedFarApart`/`obsClockSkewedFarApart` back to
+`...TooFar` to match. Cases 12a/12b/12d all still comfortably fit within
+12 hours, unaffected.
+
+## Untagged local photos are never match candidates at all (2026-07-24)
+
+Explicit direction, same conversation: "there's no point suggesting
+photos with no ID at all" -- in the actual workflow this plugin is built
+around (DSLR photos: identify in Lightroom, THEN export to iNat), a local
+photo is always tagged before the observation it becomes even exists, so
+an untagged photo could never legitimately be a workflow match. (Species
+might still get corrected by iNat's own identification process after
+upload -- that's fine, already handled by the existing
+`candidateDiffersFromLocal`/`needsSpeciesUpdate` machinery in applyMatch,
+which doesn't require the tag to already match, just to exist.) Confirmed
+as real, not hypothetical: several genuine collisions this session were
+offering nothing but unrelated untagged photos as "candidates" that could
+never have been correct, both cluttering the dialog and masking that the
+real answer was simply missing.
+
+Fix: `pullAndMatch`'s candidateGroups filter (already excluding claimed
+groups) now also requires `g.scientificName` to be non-nil. Confirmed via
+user decision (asked explicitly, given the scale of the change) that this
+applies EVERYWHERE, not just to declutter collisions -- an untagged photo
+that would otherwise be a clean, unambiguous, non-colliding match must
+also be excluded, correctly landing in `noLocalMatchObservations` (still
+recoverable via `Set iNat Observation`'s manual override) rather than
+auto-applying. `pairByScientificName` (downstream of this filter) no
+longer needs to handle an untagged group at all -- updated its doc
+comment accordingly, left the function's own defensive `scientificName`
+checks in place since they're harmless and this repo doesn't otherwise
+strip proven-redundant guards from tested code.
+
+This deliberately does NOT touch the separate sibling-absorption
+mechanism in `applyMatch` (`untaggedSingletonsSortedByTime`,
+`photosByFilename`) -- an untagged sibling of an ALREADY-matched group is
+a different, still-valid case (a burst-shot companion never individually
+run through identify), unrelated to whether an untagged photo can be the
+PRIMARY match for an observation.
+
+Regression tests required a substantial rework, not just new cases --
+this retires the "historical backfill" scenario (matching a never-before-
+tagged photo via time correlation as the normal, expected case) that many
+existing fixtures across three test files modeled as ordinary. Went
+through each:
+- `mock_test_inatsync.lua`: tagged `photoMinuteTruncated`,
+  `photoFrogUnrelated`, and `photoNearbyGenuine` (previously untagged,
+  used to test TIME-tolerance exclusion specifically) -- left untagged,
+  these would now be excluded by the new tag filter instead, silently
+  making the tests pass without ever exercising the time logic they were
+  built to guard. Repurposed Case 5 (`photoUntaggedA`/`photoUntaggedB`)
+  from "untagged collision left for manual resolution" to "collision with
+  only untagged candidates correctly reports no local match." Tagged
+  `photoWrongA`/`photoWrongB` (Case 12f) with distinct species (rather
+  than leaving them untagged) so that case still tests what it was built
+  for -- a genuine collision between other real candidates missing its
+  best one -- since untagged versions would just make the whole cluster
+  disappear into `noLocalMatchObservations` instead. Added Case 12g: the
+  most basic version of this fix -- a single untagged photo that would
+  have been a clean, non-colliding match must still be excluded.
+- `mock_test_syncfrominaturalist.lua`: tagged `photoA`/`photoB` with the
+  SAME placeholder species name (ambiguous between them, matching
+  neither observation's real taxon) so the manual-resolution-then-skip
+  retry-list test still has a genuine ambiguity to skip, rather than
+  reporting no local match before any dialog is ever reached.
+- `mock_test_sync_merge_integration.lua`: tagged every "master" photo
+  fixture across all cases (`photoMaster`, `photoMaster2`,
+  `photoMaster4`, `photoMaster8`, `photoMaster9`) with `scientificName =
+  "Allium cernuum"`, matching their own observations' taxon -- modeling
+  the realistic post-fix shape (tagged before upload) for what these
+  cases actually test (mismatch detection, the merge-candidates picker,
+  the pending-mismatch list, the new-link confirmation dialog), none of
+  which are actually about whether the INITIAL tag exists. Left the
+  untagged "neighbor" sibling fixtures alone -- those are the separate,
+  still-valid sibling-absorption case, not primary-match candidates.
+
+## Removed "Accept All Remaining" from the new-link confirmation dialog (2026-07-24)
+
+Explicit direction: not wanted. `confirmNewLink` (INatSyncRunner.lua) no
+longer has an `otherVerb` -- just "Confirm" / "Skip For Now" -- so it can
+only ever return `"confirmed"` or `"skipped"` now (the `"acceptAll"`
+outcome is gone). Removed the `acceptAllRemainingNewLinks` run-level flag
+and its guard in the apply loop entirely -- every first-time link gets
+its own confirmation dialog, every run, with no way to bulk-skip the rest.
+This is a deliberate asymmetry with the merge-candidates picker's own
+"Skip All Remaining", which stays -- that escape hatch was never in
+question here, only this one.
+
+Regression test: `mock_test_sync_merge_integration.lua` Case 7b rewritten
+-- previously confirmed one link via `"other"` and asserted the second
+applied silently with no second dialog; now confirms both individually
+via `"ok"` and asserts TWO separate confirmation dialogs fired (one per
+first-time link), matching the new no-bulk-accept behavior.
+
+## iNat thumbnail added to the collision/confirmation dialogs (2026-07-24)
+
+Revisits the idea deferred earlier in this same session ("I'd like to
+revisit your idea of including a thumbnail from iNat"). New
+`INaturalist.downloadObservationThumbnail(observation)` downloads the
+FIRST photo of an already-pulled observation (using the `url` field the
+standard v1 pull already includes in `observation.photos` -- no extra API
+call needed) to a local temp file via `LrPathUtils.getStandardFilePath("temp")`
++ plain `io.open(..., "wb")`. Not cached across runs -- a fresh one-shot
+fetch each time a dialog needs it. Returns nil (never errors) if the
+observation has no photos or the download fails for any reason, so the
+caller can gracefully fall back to a text placeholder instead of blocking
+the dialog.
+
+`INatSyncRunner.lua`'s `buildINatThumbnail(f, observation)` wraps this:
+downloads the photo and renders it via `f:picture { value = tempPath, ... }`
+(150x150, matching the local candidate thumbnails' own size) -- LrView's
+`picture` control takes a plain file path rather than a Lightroom photo
+object the way `catalog_photo` does, since this isn't a catalog photo at
+all. Falls back to a "(iNat photo unavailable)" static_text if the
+download failed. Returns the view plus the temp file's path so the caller
+can delete it once the dialog closes (`cleanupINatThumbnail`, a
+pcall-wrapped `os.remove`) -- wired into both `resolveClusterManually`
+(the collision dialog) and `confirmNewLink` (the new-link confirmation
+dialog), placed next to the existing "View on iNat" button in each.
+
+**Confirmed live**: the downloaded photo renders correctly via `LrView`'s
+`picture` control in both dialogs -- the assumption held.
+
+Regression tests: `mock_test_inatsync.lua` Cases 0b/0c/0d test
+`downloadObservationThumbnail` directly -- a successful download writes
+the exact fetched bytes to a real temp file (using a configurable
+`standardFilePathOverride`, same pattern as other test files' real-temp-
+dir cases), a failed HTTP request (mocked non-200 status) returns nil, and
+an observation with no photos (empty list or missing field entirely)
+returns nil. Confirmed no existing test needed changes -- every test
+fixture's `makeObservation` helper omits `photos` entirely, so the new
+code's very first guard clause (`not photo`) returns nil immediately with
+no HTTP call attempted, in every existing case across all test files.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no recheck mechanism** -- diagnosed

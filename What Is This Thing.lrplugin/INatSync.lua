@@ -120,6 +120,106 @@ local function parseIsoTimestamp(iso)
     )
 end
 
+-- How far apart (in absolute seconds) a same-named group's capture time
+-- and an observation's true instant can be and still count as "the same
+-- outing" for widenCandidatesByScientificName below. A direct absolute-time
+-- comparison, NOT a rendered-calendar-date-string one (an earlier version
+-- compared "YYYY-MM-DD" via LrDate.timeToW3CDate on both sides, which had
+-- its own midnight-crossing bug -- see DEVELOPMENT_NOTES.md). Briefly
+-- removed entirely (unbounded), then reintroduced at 12 hours: unbounded
+-- matching is more permissive than needed for the actual clock-skew
+-- magnitudes confirmed live (2-6 hours) and risks a large, unwieldy
+-- candidate list for a species photographed many times across the whole
+-- catalog's history. 12 hours comfortably covers real clock-skew cases
+-- while still being narrow enough that two genuinely different sightings
+-- of a common species on different days won't usually both qualify.
+local WIDENING_TIME_TOLERANCE_SECONDS = 12 * 3600
+
+-- Widens a single observation's candidate pool beyond the time window: any
+-- already-tagged group sharing the observation's current scientific name
+-- AND within WIDENING_TIME_TOLERANCE_SECONDS of its true instant, not
+-- already a candidate and not already claimed by another observation this
+-- run, gets added too. Exists specifically for the camera-clock-skew case
+-- -- a photo whose true capture time is off by hours never falls inside
+-- even the widest time tolerance, so without this it silently becomes "no
+-- local match" (or, worse, some UNRELATED photo's mismatched suggestion)
+-- despite already carrying the exact right identification. Deliberately
+-- only a fallback (not applied when the time window already found
+-- something), so it can't turn an already-clean match into an unnecessary
+-- collision with some unrelated same-species group elsewhere in the
+-- catalog. If more than one same-named group qualifies, they surface
+-- together as a normal manual-resolution collision (see
+-- pairByScientificName's groupCountByName check) rather than one of them
+-- being silently and wrongly auto-applied -- the user picks.
+--
+-- Mutates and returns `candidateGroups` -- purely additive, so anything
+-- the time window already found is untouched. Also returns `claimedAway`
+-- (a list of { group, claimedBy } for every qualifying same-named group
+-- that WOULD have been a candidate but was already claimed by another
+-- observation this run) -- purely diagnostic, so a "no local match"
+-- outcome caused by a genuine race for one candidate group (see
+-- pullAndMatch's `claimedGroups`) can say who won it, instead of just
+-- silently reporting "no match" with no way to tell why.
+local function widenCandidatesByScientificName(candidateGroups, groupsByScientificName, observation, targetTime, claimedGroups)
+    local claimedAway = {}
+    if not (observation.taxon and observation.taxon.name and targetTime) then
+        return candidateGroups, claimedAway
+    end
+    local sameNameGroups = groupsByScientificName[observation.taxon.name]
+    if not sameNameGroups then
+        return candidateGroups, claimedAway
+    end
+
+    local alreadyCandidate = {}
+    for _, g in ipairs(candidateGroups) do
+        alreadyCandidate[g] = true
+    end
+
+    for _, g in ipairs(sameNameGroups) do
+        if not alreadyCandidate[g] and g.time
+            and math.abs(g.time - targetTime) <= WIDENING_TIME_TOLERANCE_SECONDS then
+            if claimedGroups[g] then
+                table.insert(claimedAway, { group = g, claimedBy = claimedGroups[g] })
+            else
+                table.insert(candidateGroups, g)
+                alreadyCandidate[g] = true
+            end
+        end
+    end
+
+    return candidateGroups, claimedAway
+end
+
+-- Turns a `claimedAway` list ({ group, claimedBy }, from the primary
+-- time-window filter and/or widenCandidatesByScientificName) into a single
+-- human-readable string for the sync log -- e.g. "IMG_0680.JPG already
+-- claimed this run by #170277039 (Sphyrapicus varius)". Dedupes by group
+-- identity (the SAME group can appear twice if it was excluded from the
+-- primary window and then found again by the widening scan). Returns nil
+-- if there's nothing to report.
+local function describeClaimedAway(claimedAway)
+    if #claimedAway == 0 then
+        return nil
+    end
+    local parts = {}
+    local seenGroups = {}
+    for _, entry in ipairs(claimedAway) do
+        if not seenGroups[entry.group] then
+            seenGroups[entry.group] = true
+            local filenames = {}
+            for _, photo in ipairs(entry.group.photos) do
+                table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
+            end
+            local claimLabel = "#" .. tostring(entry.claimedBy.id)
+            if entry.claimedBy.taxon then
+                claimLabel = claimLabel .. " (" .. entry.claimedBy.taxon.name .. ")"
+            end
+            table.insert(parts, table.concat(filenames, ", ") .. " already claimed this run by " .. claimLabel)
+        end
+    end
+    return table.concat(parts, "; ")
+end
+
 -- Groups every photo in the catalog by its local `observationId` (photos
 -- identified together in one batch, via the normal identify flow) --
 -- ungrouped photos (never run through this plugin, e.g. the historical
@@ -141,7 +241,11 @@ end
 -- of { time, photo } for every photo that's never been through this
 -- plugin's identify flow at all -- no local observationId, no
 -- scientificName -- sorted by time, for the time-based sibling-absorption
--- fallback used when iNat's filename data isn't usable -- see applyMatch).
+-- fallback used when iNat's filename data isn't usable -- see applyMatch),
+-- groupsByScientificName (a table keyed by scientificName -> list of
+-- already-tagged groups sharing that name, for widening a single
+-- observation's candidate search beyond the time window -- see
+-- pullAndMatch).
 local function buildLocalIndex(catalog)
     local byLocalObservationId = {}
     local groups = {}
@@ -207,9 +311,22 @@ local function buildLocalIndex(catalog)
 
     local sortedGroups = {}
     local untaggedSingletonsSortedByTime = {}
+    -- Every already-tagged group, keyed by its scientificName -- lets
+    -- pullAndMatch widen a single observation's candidate search beyond the
+    -- time window (see the "same scientific name and date" widening there)
+    -- without a linear scan over every group in the catalog per observation.
+    local groupsByScientificName = {}
     for _, group in ipairs(groups) do
         if group.time then
             table.insert(sortedGroups, group)
+            if group.scientificName then
+                local list = groupsByScientificName[group.scientificName]
+                if not list then
+                    list = {}
+                    groupsByScientificName[group.scientificName] = list
+                end
+                table.insert(list, group)
+            end
         end
         -- A group with no local observationId is always a singleton (by
         -- construction above -- there's no way for two never-identified
@@ -223,7 +340,7 @@ local function buildLocalIndex(catalog)
     table.sort(sortedGroups, function(a, b) return a.time < b.time end)
     table.sort(untaggedSingletonsSortedByTime, function(a, b) return a.time < b.time end)
 
-    return sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime
+    return sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime, groupsByScientificName
 end
 
 -- Binary-searches `sortedGroups` (sorted by .time) for every group within
@@ -250,13 +367,14 @@ end
 
 -- Tries to uniquely pair each candidate local group against one of the
 -- colliding iNat observations by comparing the group's existing
--- `scientificName` (only ever set if it's already been through this
--- plugin's normal identify flow) against each observation's `taxon.name`.
--- This is what lets a virtual-copy timestamp collision resolve itself
--- automatically for already-tagged photos, while photos with no existing
--- tag (the historical-backfill case) fall through to the leftovers for
--- manual resolution -- same code path either way, just naturally better or
--- worse disambiguation depending on whether a local tag exists yet.
+-- `scientificName` against each observation's `taxon.name`. This is what
+-- lets a virtual-copy timestamp collision resolve itself automatically.
+-- `candidateGroups` is always already tagged by the time it reaches here
+-- (pullAndMatch filters out untagged groups entirely before calling this
+-- -- see the comment there), so every group passed in has a name to
+-- compare; a group only ends up in leftoverGroups here because its name
+-- doesn't uniquely match any of the colliding observations, not because
+-- it has no name at all.
 --
 -- Returns resolved (a list of { group, observation }), leftoverGroups,
 -- leftoverObservations.
@@ -264,8 +382,23 @@ local function pairByScientificName(candidateGroups, candidateObservations)
     local resolved = {}
     local usedGroups, usedObservationIndexes = {}, {}
 
+    -- A group's name is only trusted for auto-resolution when it's ALSO
+    -- unique among the other candidate groups -- otherwise (multiple
+    -- same-species candidates for one observation, e.g. via the
+    -- same-day/same-name widening in pullAndMatch) the loop below would
+    -- greedily pair the single observation with whichever group happened
+    -- to come first in iteration order and silently drop the other,
+    -- equally-plausible candidates instead of surfacing them for manual
+    -- review.
+    local groupCountByName = {}
     for _, group in ipairs(candidateGroups) do
         if group.scientificName then
+            groupCountByName[group.scientificName] = (groupCountByName[group.scientificName] or 0) + 1
+        end
+    end
+
+    for _, group in ipairs(candidateGroups) do
+        if group.scientificName and groupCountByName[group.scientificName] == 1 then
             local matchIndex, matchCount = nil, 0
             for i, obs in ipairs(candidateObservations) do
                 if not usedObservationIndexes[i] and obs.taxon and obs.taxon.name == group.scientificName then
@@ -299,23 +432,48 @@ end
 -- Pulls observations (all of them if `updatedSince` is nil, i.e. a
 -- first-ever run; only changed ones since then otherwise) plus anything
 -- still on the retry list (see markRetryOutcome below), and matches each
--- to a local photo group.
+-- to a local photo group. Untagged groups (never been through this
+-- plugin's identify flow) are never candidates at all -- see the comment
+-- at the candidateGroups filter below for why. If the primary time-window
+-- search finds nothing at all, the candidate pool falls back to any
+-- already-tagged group
+-- sharing the observation's scientific name within
+-- WIDENING_TIME_TOLERANCE_SECONDS (see widenCandidatesByScientificName)
+-- -- specifically for a camera whose clock (or Lightroom's interpretation
+-- of it) is off by a few hours, so its true capture time falls outside
+-- even the widest time tolerance despite the photo already carrying the
+-- exact right identification. Deliberately only a fallback (not applied
+-- when the time window already found something), so it can't turn an
+-- already-clean match into an unnecessary collision with some unrelated
+-- same-species group elsewhere in the catalog.
 --
 -- Returns { toApply = { {group, observation}, ... }, toResolveManually =
--- { {groups, observations}, ... }, noLocalMatchObservations = { observation,
--- ... }, photosByFilename, untaggedSingletonsSortedByTime = (both see
--- buildLocalIndex) }. `toApply` entries are unambiguous and ready for
--- applyMatch() (photosByFilename and untaggedSingletonsSortedByTime should
--- both be passed through to each call, to absorb untagged sibling photos);
--- `toResolveManually` entries need a user decision (more than one
--- plausible local group AND more than one plausible observation collided
--- at the same timestamp, with no existing tag to disambiguate
--- automatically). `noLocalMatchObservations` is the FULL observation list
--- (not just a count) specifically so a full per-run log can record which
--- observations these were, not just how many.
+-- { {groups, observations, claimedAwayReason}, ... }, noLocalMatchObservations
+-- = { observation, ... }, noLocalMatchReasons, photosByFilename,
+-- untaggedSingletonsSortedByTime = (both see buildLocalIndex) }. `toApply`
+-- entries are unambiguous and ready for applyMatch() (photosByFilename and
+-- untaggedSingletonsSortedByTime should both be passed through to each
+-- call, to absorb untagged sibling photos); `toResolveManually` entries
+-- need a user decision (more than one plausible local group AND more than
+-- one plausible observation collided at the same timestamp, with no
+-- existing tag to disambiguate automatically) -- `claimedAwayReason`
+-- (a string, or nil) explains any candidate that would ALSO have been
+-- offered here but was already claimed by another observation this run,
+-- so a collision missing its obviously-correct candidate is traceable
+-- rather than just showing whichever wrong candidates remain (confirmed
+-- live: observation #384538787's real match, already tagged with the
+-- right species, was entirely absent from its own collision's candidate
+-- list). `noLocalMatchObservations` is the FULL observation list (not
+-- just a count) specifically so a full per-run log can record which
+-- observations these were, not just how many. `noLocalMatchReasons`
+-- (keyed by observation id) is the same claimed-away explanation for the
+-- #candidateGroups == 0 case specifically (confirmed live: a real,
+-- otherwise untraceable case where the right local group existed but had
+-- already been claimed by an unrelated, earlier-processed observation).
 function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     local catalog = LrApplication.activeCatalog()
-    local sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime = buildLocalIndex(catalog)
+    local sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime, groupsByScientificName =
+        buildLocalIndex(catalog)
 
     local observations = INaturalist.getMyObservations(username, updatedSince, onProgress)
 
@@ -335,6 +493,16 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     local toApply = {}
     local toResolveManually = {}
     local noLocalMatchObservations = {}
+    -- Keyed by observation id -> a human-readable explanation, populated
+    -- ONLY when a "no local match" outcome was caused by a genuine race for
+    -- one candidate group that got claimed by another observation first
+    -- (see claimedGroups below) -- otherwise there's no way to tell "truly
+    -- nothing nearby" apart from "the right photo existed but something
+    -- else grabbed it first," confirmed live as a real, hard-to-diagnose
+    -- case (observation #384538806's candidate group went to an earlier-
+    -- processed, unrelated observation purely by coincidental time
+    -- proximity).
+    local noLocalMatchReasons = {}
     local handled = {}
 
     -- Tracks which local groups have already been assigned to some
@@ -359,7 +527,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
             local fastGroup = byINatId[tostring(observation.id)]
             if fastGroup then
                 table.insert(toApply, { group = fastGroup, observation = observation })
-                claimedGroups[fastGroup] = true
+                claimedGroups[fastGroup] = observation
             else
                 local time = parseIsoTimestamp(observation.time_observed_at)
                 -- Wide tolerance only for observations that actually show
@@ -369,17 +537,59 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                     and TRUNCATED_TOLERANCE_SECONDS or TIGHT_TOLERANCE_SECONDS
                 local rawCandidateGroups = time and findCandidateGroups(sortedGroups, time, tolerance) or {}
                 local candidateGroups = {}
+                local claimedAway = {}
                 for _, g in ipairs(rawCandidateGroups) do
-                    if not claimedGroups[g] then
-                        table.insert(candidateGroups, g)
+                    -- An untagged group (never been through this plugin's
+                    -- identify flow) is never a viable match candidate --
+                    -- per the actual workflow this plugin is built around,
+                    -- a photo is always identified BEFORE it's exported to
+                    -- iNat, so a freshly-created observation's real local
+                    -- match is always already tagged (its species might
+                    -- still get corrected by iNat's own identification
+                    -- process after upload, but SOME tag was always
+                    -- present pre-upload). Confirmed live as real noise,
+                    -- not just a hypothetical: several genuine collisions
+                    -- were offering nothing but unrelated untagged photos
+                    -- as "candidates" -- options that could never actually
+                    -- be correct, cluttering the dialog and masking that
+                    -- the real answer was simply missing (not yet
+                    -- matched). Untagged photos remain eligible for the
+                    -- SEPARATE sibling-absorption mechanism in applyMatch
+                    -- (an untagged sibling of an ALREADY-matched group is a
+                    -- different, still-valid case) -- this only excludes
+                    -- them from being treated as the primary match for an
+                    -- observation.
+                    if g.scientificName then
+                        if claimedGroups[g] then
+                            table.insert(claimedAway, { group = g, claimedBy = claimedGroups[g] })
+                        else
+                            table.insert(candidateGroups, g)
+                        end
+                    end
+                end
+                -- Only a FALLBACK for observations the time window found
+                -- nothing for -- an observation that already has a clean
+                -- time-based match (unambiguous or a genuine multi-way
+                -- collision) is left alone, so this can't turn an
+                -- already-working match into an unnecessary collision with
+                -- some unrelated same-species-same-day group elsewhere in
+                -- the catalog.
+                if #candidateGroups == 0 then
+                    local widenedGroups, widenedClaimedAway = widenCandidatesByScientificName(
+                        candidateGroups, groupsByScientificName, observation, time, claimedGroups
+                    )
+                    candidateGroups = widenedGroups
+                    for _, entry in ipairs(widenedClaimedAway) do
+                        table.insert(claimedAway, entry)
                     end
                 end
 
                 if #candidateGroups == 0 then
                     table.insert(noLocalMatchObservations, observation)
+                    noLocalMatchReasons[observation.id] = describeClaimedAway(claimedAway)
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
-                    claimedGroups[candidateGroups[1]] = true
+                    claimedGroups[candidateGroups[1]] = observation
                 else
                     -- Genuine collision: gather every other not-yet-handled
                     -- pulled observation within tolerance of this same
@@ -401,13 +611,25 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
 
                     for _, pair in ipairs(resolved) do
                         table.insert(toApply, pair)
-                        claimedGroups[pair.group] = true
+                        claimedGroups[pair.group] = pair.observation
                     end
 
                     if #leftoverGroups > 0 and #leftoverObservations > 0 then
                         table.insert(toResolveManually, {
                             groups = leftoverGroups,
                             observations = leftoverObservations,
+                            -- A candidate that would have been available
+                            -- here was already claimed by another
+                            -- observation before this one got its turn --
+                            -- surfaced live: a genuine, otherwise correct
+                            -- match (#384538787's actual photo) can be
+                            -- missing from a collision's candidate list
+                            -- for exactly this reason, with no clue why
+                            -- unless this is threaded through (the
+                            -- noLocalMatchReasons diagnostic only covered
+                            -- the #candidateGroups == 0 case, not "some
+                            -- candidates remain, but a better one is gone").
+                            claimedAwayReason = describeClaimedAway(claimedAway),
                         })
                     elseif #leftoverObservations > 0 then
                         -- More colliding observations than candidate local
@@ -425,6 +647,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
         toApply = toApply,
         toResolveManually = toResolveManually,
         noLocalMatchObservations = noLocalMatchObservations,
+        noLocalMatchReasons = noLocalMatchReasons,
         photosByFilename = photosByFilename,
         untaggedSingletonsSortedByTime = untaggedSingletonsSortedByTime,
     }

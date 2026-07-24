@@ -998,6 +998,43 @@ function INaturalist.getObservationPhotoCount(observationId)
     return #(observation.photos or {})
 end
 
+-- Downloads the FIRST photo of an already-pulled observation (using the
+-- `url` field the standard v1 pull already includes -- see
+-- getMyObservations, no extra API call needed) to a local temp file, so
+-- the sync dialogs can show an actual iNat thumbnail next to the local
+-- candidate photo instead of just text. NOT cached/persisted across runs
+-- -- a fresh one-shot fetch each time a dialog needs it, deleted by the
+-- caller once the dialog closes. Returns the local file path, or nil if
+-- the observation has no photos or the download failed for any reason
+-- (network, non-200 status, write failure) -- callers should treat nil as
+-- "couldn't show a preview this time," not an error worth interrupting
+-- the sync over.
+--
+-- Confirmed live: the downloaded file renders correctly via LrView's
+-- `picture` control (see buildINatThumbnail in INatSyncRunner.lua).
+function INaturalist.downloadObservationThumbnail(observation)
+    local photo = observation.photos and observation.photos[1]
+    if not photo or not photo.url or photo.url == "" then
+        return nil
+    end
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, photo.url)
+    if not ok or not hdrs or hdrs.status ~= 200 or not response or response == "" then
+        return nil
+    end
+
+    local tempDir = LrPathUtils.getStandardFilePath("temp")
+    local tempPath = LrPathUtils.child(tempDir, "inat-thumb-" .. tostring(observation.id) .. ".jpg")
+
+    local writeOk = pcall(function()
+        local f = assert(io.open(tempPath, "wb"))
+        f:write(response)
+        f:close()
+    end)
+
+    return writeOk and tempPath or nil
+end
+
 -- Diagnostic-only (used by ShowObservationFilenames.lua): performs the
 -- exact same fetch as getObservationPhotoFilenames, but never swallows the
 -- failure -- returns the URL, the raw pcall/HTTP-status/response-snippet
