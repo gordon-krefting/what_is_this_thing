@@ -1052,8 +1052,123 @@ counts (3 and 3) do.
     it; select the other 2, run it again with observation B) -- each
     invocation only affects its own selection.
 
+## Full per-observation sync log (2026-07-24)
+
+Reported live: after uploading several new observations to iNat and
+running "Sync from iNaturalist," nothing appeared to happen -- the
+relevant photos weren't updated with an iNat ID or link. Live
+investigation (plist inspection, direct `updated_since` curl calls against
+the real API at two different cutoffs, direct SQLite queries against the
+active `.lrcat`) confirmed the run itself completed and DID advance the
+sync cursor past all the recently-touched observations, but only some of
+them showed up anywhere in the closing summary dialog -- several were
+unaccounted for in every bucket, including "no local match" (which showed
+as zero/absent). Couldn't pin down further because the summary dialog is
+the only record of a run and it's gone the moment it's closed (or the sync
+is run again) -- there was no way to go back and see what actually
+happened to a specific observation after the fact.
+
+Fix: `INatSyncRunner.run()` now builds a `runLog` table alongside the
+existing counts/mismatches, with one entry per observation actually
+reached this run -- covering every outcome, including ones that
+previously left no trace anywhere: `no_local_match`, `unresolved_collision`
+(both the normal skip-in-dialog path and the run-canceled-before-
+resolution path), `canceled_before_apply` (progress canceled partway
+through the apply loop), the normal `applyMatch` status outcomes
+(`applied`/`linkedOnly`/`repairedAncestry`/`skippedDisagreement`) with a
+mismatch detail string when applicable, and `failed`. Written
+append-only (never overwritten, unlike the mismatch HTML) to
+`~/Photos/local/WhatIsThisThing/inat-sync-log.txt` via a new
+`writeFullSyncLog()`, one timestamped `=== ... ===` header block per run
+followed by one plain-text line per observation (id, taxon name if known,
+outcome, detail). The closing summary dialog now mentions this path
+(`formatSummary` gained a `fullLogPath` parameter) so it's discoverable
+without having to know it exists.
+
+This is diagnostic infrastructure, not a fix for the "nothing happened"
+bug itself -- that investigation is still open. Next step is having the
+user run the sync again and share the resulting log so the specific
+observations in question can be traced by outcome instead of reconstructed
+from screenshots.
+
+Also required renaming `INatSync.pullAndMatch`'s report field
+`noLocalMatchCount` (a bare integer) to `noLocalMatchObservations` (the
+full list of observation objects), since the log needs to know which
+observations landed there, not just how many -- `counts.noLocalMatch` in
+the runner is now `#report.noLocalMatchObservations`.
+
+Regression test: `mock_test_sync_merge_integration.lua` Case 6 runs a real
+end-to-end sync (via `FullSyncFromINaturalist.lua`) against one observation
+with a normal local match and one with no local match at all, then reads
+the actual log file back off disk (using a real writable temp directory
+for this one case, unlike every other case in that file, which
+deliberately points `LrPathUtils.getStandardFilePath` at a nonexistent
+path with a no-op `createAllDirectories` so the log write fails harmlessly)
+and confirms both observation ids appear with the expected outcome,
+including `no_local_match` for the unmatched one.
+
+## Unresolved-collision log entries didn't name the local photo (2026-07-24)
+
+Reported live right after the full sync log shipped: observation
+#384443380 (a genuine collision needing manual resolution, skipped via
+"Skip For Now") did show up in `inat-sync-log.txt`, but its detail was
+just "skipped in the match dialog" -- no mention of `IMG_0630.JPG`, the
+actual local photo the on-screen dialog had been asking about. Technically
+present, practically useless -- there was no way to tell which local file
+was involved without re-running the sync and watching the dialog again.
+
+Fix: extracted the per-group "filenames + currently-tagged species"
+label-building already used for the dialog's own text (previously
+recomputed inline inside `resolveClusterManually`'s loop) into a shared
+`describeCandidateGroups(groups)` helper. `resolveClusterManually` now
+also returns `groupLabels` (one label per local candidate group in the
+cluster), and both call sites in `INatSyncRunner.run` that log an
+`unresolved_collision` outcome -- the normal skip-in-dialog path AND the
+run-canceled-before-resolution path (which never called
+`resolveClusterManually` at all, so needed its own
+`describeCandidateGroups(cluster.groups)` call) -- fold those labels into
+the log detail: `"skipped in the match dialog -- candidate local photo(s)
+in this cluster: IMG_0630.JPG"`.
+
+Regression test: `mock_test_syncfrominaturalist.lua`'s existing
+manual-resolution-skip scenario (two untagged photos, `DSC_7378.NEF` /
+`DSC_7379.NEF`, colliding with two observations, dialog always returns
+"cancel") now also points `LrPathUtils.getStandardFilePath` at a real
+writable temp directory (previously nonexistent/no-op like the other
+cases, since this test only used to check the retry list) and reads the
+actual log file back off disk to confirm both filenames appear in the
+unresolved-collision entries.
+
 ## Explicitly deferred / still open
 
+- **Cursor-orphaned observations have no recheck mechanism** -- diagnosed
+  2026-07-24 as (at least one cause of) the earlier "nothing happened"
+  reports. Confirmed live against observation #384297708: iNat's current
+  identification (agreed with, own "supporting" ID) is species-level
+  `Polygonia interrogationis`; the local tag was still genus-level
+  `Polygonia`, direct-queried from `AgSearchablePhotoProperty` (the actual
+  storage table for this plugin's custom fields -- NOT `AgPhotoProperty`,
+  which was the wrong table queried in earlier sessions, hence that
+  standing "zero rows despite obvious usage" mystery; both tables exist,
+  only the searchable one gets populated). The stored `lastINatSyncAt`
+  cursor (2026-07-24T03:22:58 UTC) was already PAST this observation's
+  `updated_at` (2026-07-24T02:42:22 UTC), so `updated_since`-filtered
+  incremental Sync will never re-fetch it again. Confirmed this isn't a
+  matching-algorithm bug: replaying the real `INatSync.pullAndMatch`
+  against the live API with a pre-update cursor correctly finds and
+  resolves it to `toApply`. The gap is structural: unlike apply-failures
+  (`iNatPendingRetryIds`) or filename mismatches
+  (`iNatPendingMismatchIds`), an observation that updates on iNat's side
+  but never gets caught by any run's `updated_since` window (because some
+  earlier run's cursor already advanced past it without applying it -- the
+  exact sequence of which run did this isn't reconstructable, since no log
+  existed before this session's logging feature) has NO bounded recheck
+  list putting it back in view. Full Sync (ignores the cursor, full
+  history pull) is the workaround already available today. TODO: design a
+  permanent fix -- likely a periodic reconciliation pass, independent of
+  the cursor, that re-verifies already-linked observations' current
+  `updated_at` against what was last actually applied locally, rather than
+  trusting the incremental delta alone.
 - **Recovering "orphan" observations** (made in the iNat phone app, or
   from photos living in Apple Photos -- never imported into Lightroom;
   distinct from the false-collision case above, which involves photos

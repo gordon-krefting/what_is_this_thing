@@ -23,6 +23,28 @@ local MergeCandidatesDialog = dofile(LrPathUtils.child(_PLUGIN.path, "MergeCandi
 -- thin wrappers calling INatSyncRunner.run(options) below.
 local INatSyncRunner = {}
 
+-- One label per local candidate group in a cluster: its photos' filenames
+-- plus its existing tag, if any -- shared between resolveClusterManually
+-- (for the dialog text) and both call sites that log an unresolved
+-- collision (so the log names the actual local file(s) involved, not just
+-- a bare iNat observation id -- reported live that "skipped in the match
+-- dialog" alone gave no way to know which photo the dialog was even about).
+local function describeCandidateGroups(groups)
+    local labels = {}
+    for _, group in ipairs(groups) do
+        local filenames = {}
+        for _, photo in ipairs(group.photos) do
+            table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
+        end
+        local label = table.concat(filenames, ", ")
+        if group.scientificName then
+            label = label .. "  (currently tagged: " .. group.scientificName .. ")"
+        end
+        table.insert(labels, label)
+    end
+    return labels
+end
+
 -- Presents one small dialog per still-ambiguous local group in a collision
 -- cluster (more than one candidate group AND more than one candidate
 -- observation shared a capture time, with no existing tag to disambiguate
@@ -30,14 +52,17 @@ local INatSyncRunner = {}
 -- remaining candidate observations as radio choices; picking one removes
 -- it from the pool offered to the next group in the same cluster.
 --
--- Returns resolvedPairs, unresolvedObservations. The latter is every
--- observation still left in the pool once every group in the cluster has
--- either been matched or run out of candidates -- this includes anything
--- skipped via "Skip For Now". The caller MUST feed these into the retry
--- list (INatSync.markRetryOutcome) -- without that, a skipped observation
--- has no local match recorded and the `updated_since` cursor still
--- advances past it, so it would otherwise vanish rather than being offered
--- again next run (confirmed live: this was a real bug, not a hypothetical).
+-- Returns resolvedPairs, unresolvedObservations, groupLabels. The second is
+-- every observation still left in the pool once every group in the cluster
+-- has either been matched or run out of candidates -- this includes
+-- anything skipped via "Skip For Now". The caller MUST feed these into the
+-- retry list (INatSync.markRetryOutcome) -- without that, a skipped
+-- observation has no local match recorded and the `updated_since` cursor
+-- still advances past it, so it would otherwise vanish rather than being
+-- offered again next run (confirmed live: this was a real bug, not a
+-- hypothetical). `groupLabels` is every local candidate group's filenames
+-- (+ existing tag, if any) in the cluster (see describeCandidateGroups),
+-- for the caller to fold into the sync log.
 local function resolveClusterManually(cluster)
     local resolvedPairs = {}
     local remainingObservations = {}
@@ -45,19 +70,14 @@ local function resolveClusterManually(cluster)
         table.insert(remainingObservations, obs)
     end
 
-    for _, group in ipairs(cluster.groups) do
+    local groupLabels = describeCandidateGroups(cluster.groups)
+
+    for groupIndex, group in ipairs(cluster.groups) do
         if #remainingObservations == 0 then
             break
         end
 
-        local filenames = {}
-        for _, photo in ipairs(group.photos) do
-            table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
-        end
-        local groupLabel = table.concat(filenames, ", ")
-        if group.scientificName then
-            groupLabel = groupLabel .. "  (currently tagged: " .. group.scientificName .. ")"
-        end
+        local groupLabel = groupLabels[groupIndex]
 
         local chosenIndex = nil
 
@@ -151,7 +171,7 @@ local function resolveClusterManually(cluster)
         end
     end
 
-    return resolvedPairs, remainingObservations
+    return resolvedPairs, remainingObservations, groupLabels
 end
 
 -- Short, generic mismatch description (no filenames) -- used both for the
@@ -277,7 +297,60 @@ local function writeMismatchLog(mismatches)
     return writeOk and path or nil
 end
 
-local function formatSummary(counts, mismatches, logPath)
+-- Appends a full per-observation record of this run -- every observation
+-- actually reached, and exactly which outcome it landed in -- to a
+-- plain-text, ever-growing log (unlike the mismatch HTML above, which is
+-- overwritten each run and only covers unresolved mismatches). Exists
+-- specifically because a run that appears to do "nothing" for some
+-- observations previously left NO trace anywhere once the closing dialog
+-- was dismissed -- confirmed live as a real diagnosis blocker. Plain text,
+-- not HTML, and append-only (not overwritten) -- this is a debugging/audit
+-- trail across runs, not a "work queue" like the mismatch report.
+--
+-- Uses plain io.open in append mode, same "not yet confirmed live in
+-- Lightroom's Lua sandbox" caveat as writeMismatchLog/TaxonStore.lua;
+-- wrapped in pcall so a failure here never breaks the rest of the summary.
+--
+-- Returns the file path on success, or nil if there was nothing to log
+-- (empty run) or the write failed.
+local function writeFullSyncLog(runLog, meta)
+    if #runLog == 0 then
+        return nil
+    end
+
+    local home = LrPathUtils.getStandardFilePath("home")
+    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
+    dir = LrPathUtils.child(dir, "WhatIsThisThing")
+    local path = LrPathUtils.child(dir, "inat-sync-log.txt")
+
+    local lines = {
+        "=== " .. LrDate.timeToW3CDate(LrDate.currentTime()) .. " -- " .. tostring(meta.syncType)
+            .. " -- " .. tostring(#runLog) .. " observation(s) ===",
+    }
+    for _, entry in ipairs(runLog) do
+        local line = "  #" .. tostring(entry.observationId)
+        if entry.taxonName then
+            line = line .. " (" .. entry.taxonName .. ")"
+        end
+        line = line .. " -- " .. entry.outcome
+        if entry.detail then
+            line = line .. " -- " .. entry.detail
+        end
+        table.insert(lines, line)
+    end
+    table.insert(lines, "")
+
+    local writeOk = pcall(function()
+        LrFileUtils.createAllDirectories(dir)
+        local f = assert(io.open(path, "a"))
+        f:write(table.concat(lines, "\n") .. "\n")
+        f:close()
+    end)
+
+    return writeOk and path or nil
+end
+
+local function formatSummary(counts, mismatches, logPath, fullLogPath)
     local parts = {}
     if counts.applied > 0 then
         table.insert(parts, counts.applied .. " photo group" .. (counts.applied == 1 and "" or "s") .. " updated with a new ID")
@@ -331,6 +404,10 @@ local function formatSummary(counts, mismatches, logPath)
         if logPath then
             message = message .. "\n\nFull details (clickable iNat links, filenames, capture dates) written to (open in a browser):\n" .. logPath
         end
+    end
+
+    if fullLogPath then
+        message = message .. "\n\nFull per-observation log appended to:\n" .. fullLogPath
     end
 
     return message
@@ -412,6 +489,25 @@ function INatSyncRunner.run(options)
         -- pcall here produced exactly the documented failure mode ("attempt
         -- to yield across metamethod/C-call boundary") live -- the third time
         -- this exact class of bug has hit this project (see project memory).
+        -- Full per-observation record of every run, not just mismatches --
+        -- confirmed live this was genuinely needed: a run that appeared to
+        -- do "nothing" for several freshly-uploaded observations turned out
+        -- to need this to even start diagnosing, since the closing dialog
+        -- is the only other record and it's gone the moment you close it
+        -- (or run the sync again). One entry per observation actually
+        -- reached this run, covering every possible outcome -- including
+        -- ones that previously left no trace at all (no local match,
+        -- canceled before being reached).
+        local runLog = {}
+        local function logObservation(observation, outcome, detail)
+            table.insert(runLog, {
+                observationId = observation.id,
+                taxonName = observation.taxon and observation.taxon.name,
+                outcome = outcome,
+                detail = detail,
+            })
+        end
+
         local runOk, runErr = LrTasks.pcall(function()
             -- Shows exactly what's being requested -- full history vs. a
             -- cutoff date -- for the whole pull phase (not just a fleeting
@@ -431,6 +527,10 @@ function INatSyncRunner.run(options)
                 error("Couldn't pull observations: " .. tostring(report))
             end
 
+            for _, obs in ipairs(report.noLocalMatchObservations) do
+                logObservation(obs, "no_local_match")
+            end
+
             local allMatches = {}
             for _, match in ipairs(report.toApply) do
                 table.insert(allMatches, match)
@@ -439,7 +539,7 @@ function INatSyncRunner.run(options)
             local unresolvedCollisions = 0
             if not progressScope:isCanceled() then
                 for _, cluster in ipairs(report.toResolveManually) do
-                    local resolved, unresolvedObservations = resolveClusterManually(cluster)
+                    local resolved, unresolvedObservations, groupLabels = resolveClusterManually(cluster)
                     for _, pair in ipairs(resolved) do
                         table.insert(allMatches, pair)
                     end
@@ -450,6 +550,11 @@ function INatSyncRunner.run(options)
                     -- this matters.
                     for _, obs in ipairs(unresolvedObservations) do
                         INatSync.markRetryOutcome(obs.id, false)
+                        logObservation(
+                            obs, "unresolved_collision",
+                            "skipped in the match dialog -- candidate local photo(s) in this cluster: "
+                                .. table.concat(groupLabels, "; ")
+                        )
                     end
                     unresolvedCollisions = unresolvedCollisions + (#cluster.groups - #resolved)
                 end
@@ -458,8 +563,14 @@ function INatSyncRunner.run(options)
                 -- started -- every observation in every remaining cluster is
                 -- unresolved, and needs the same retry-list treatment.
                 for _, cluster in ipairs(report.toResolveManually) do
+                    local groupLabels = describeCandidateGroups(cluster.groups)
                     for _, obs in ipairs(cluster.observations) do
                         INatSync.markRetryOutcome(obs.id, false)
+                        logObservation(
+                            obs, "unresolved_collision",
+                            "run canceled before manual resolution -- candidate local photo(s) in this cluster: "
+                                .. table.concat(groupLabels, "; ")
+                        )
                     end
                     unresolvedCollisions = unresolvedCollisions + #cluster.groups
                 end
@@ -467,7 +578,7 @@ function INatSyncRunner.run(options)
 
             local counts = {
                 applied = 0, linkedOnly = 0, repairedAncestry = 0, skippedDisagreement = 0, failed = 0,
-                noLocalMatch = report.noLocalMatchCount, unresolvedCollisions = unresolvedCollisions,
+                noLocalMatch = #report.noLocalMatchObservations, unresolvedCollisions = unresolvedCollisions,
                 absorbedSiblings = 0, resolvedViaMergeDialog = 0,
             }
             local mismatches = {}
@@ -487,6 +598,9 @@ function INatSyncRunner.run(options)
             for i, match in ipairs(allMatches) do
                 if progressScope:isCanceled() then
                     canceledDuringApply = true
+                    for j = i, #allMatches do
+                        logObservation(allMatches[j].observation, "canceled_before_apply")
+                    end
                     break
                 end
 
@@ -555,12 +669,24 @@ function INatSyncRunner.run(options)
                         if result.checkedMismatch then
                             INatSync.markMismatchOutcome(match.observation.id, not resolvedInteractively)
                         end
-                    elseif result.checkedMismatch then
-                        INatSync.markMismatchOutcome(match.observation.id, false)
+
+                        logObservation(
+                            match.observation, result.status,
+                            resolvedInteractively and "mismatch resolved via merge picker"
+                                or "mismatch: " .. (result.mismatch.countMismatch
+                                    and string.format("iNat has %d, local has %d", result.mismatch.countMismatch.iNatCount, result.mismatch.countMismatch.localCount)
+                                    or table.concat(result.mismatch.missingLocally or {}, ", "))
+                        )
+                    else
+                        if result.checkedMismatch then
+                            INatSync.markMismatchOutcome(match.observation.id, false)
+                        end
+                        logObservation(match.observation, result.status)
                     end
                 else
                     INatSync.markRetryOutcome(match.observation.id, false)
                     counts.failed = counts.failed + 1
+                    logObservation(match.observation, "failed", tostring(result))
                 end
             end
 
@@ -573,7 +699,10 @@ function INatSyncRunner.run(options)
             end
 
             local logPath = writeMismatchLog(mismatches)
-            LrDialogs.message("Sync from iNaturalist", formatSummary(counts, mismatches, logPath), "info")
+            local syncType = options.forceRecheckAll and "Rebuild Mismatch List"
+                or options.forceFullPull and "Full Sync" or "Sync"
+            local fullLogPath = writeFullSyncLog(runLog, { syncType = syncType })
+            LrDialogs.message("Sync from iNaturalist", formatSummary(counts, mismatches, logPath, fullLogPath), "info")
         end)
 
         progressScope:done()

@@ -302,14 +302,17 @@ end
 -- to a local photo group.
 --
 -- Returns { toApply = { {group, observation}, ... }, toResolveManually =
--- { {groups, observations}, ... }, noLocalMatchCount = N, photosByFilename,
--- untaggedSingletonsSortedByTime = (both see buildLocalIndex) }. `toApply`
--- entries are unambiguous and ready for applyMatch() (photosByFilename and
--- untaggedSingletonsSortedByTime should both be passed through to each
--- call, to absorb untagged sibling photos); `toResolveManually` entries
--- need a user decision (more than one plausible local group AND more than
--- one plausible observation collided at the same timestamp, with no
--- existing tag to disambiguate automatically).
+-- { {groups, observations}, ... }, noLocalMatchObservations = { observation,
+-- ... }, photosByFilename, untaggedSingletonsSortedByTime = (both see
+-- buildLocalIndex) }. `toApply` entries are unambiguous and ready for
+-- applyMatch() (photosByFilename and untaggedSingletonsSortedByTime should
+-- both be passed through to each call, to absorb untagged sibling photos);
+-- `toResolveManually` entries need a user decision (more than one
+-- plausible local group AND more than one plausible observation collided
+-- at the same timestamp, with no existing tag to disambiguate
+-- automatically). `noLocalMatchObservations` is the FULL observation list
+-- (not just a count) specifically so a full per-run log can record which
+-- observations these were, not just how many.
 function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     local catalog = LrApplication.activeCatalog()
     local sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime = buildLocalIndex(catalog)
@@ -331,7 +334,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
 
     local toApply = {}
     local toResolveManually = {}
-    local noLocalMatchCount = 0
+    local noLocalMatchObservations = {}
     local handled = {}
 
     -- Tracks which local groups have already been assigned to some
@@ -373,7 +376,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                 end
 
                 if #candidateGroups == 0 then
-                    noLocalMatchCount = noLocalMatchCount + 1
+                    table.insert(noLocalMatchObservations, observation)
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
                     claimedGroups[candidateGroups[1]] = true
@@ -409,7 +412,9 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                     elseif #leftoverObservations > 0 then
                         -- More colliding observations than candidate local
                         -- groups -- the extras have no local photo at all.
-                        noLocalMatchCount = noLocalMatchCount + #leftoverObservations
+                        for _, leftoverObs in ipairs(leftoverObservations) do
+                            table.insert(noLocalMatchObservations, leftoverObs)
+                        end
                     end
                 end
             end
@@ -419,7 +424,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     return {
         toApply = toApply,
         toResolveManually = toResolveManually,
-        noLocalMatchCount = noLocalMatchCount,
+        noLocalMatchObservations = noLocalMatchObservations,
         photosByFilename = photosByFilename,
         untaggedSingletonsSortedByTime = untaggedSingletonsSortedByTime,
     }
