@@ -1804,6 +1804,58 @@ permanently, not stripped back out -- this exact category of "sync did
 nothing and left no clue why" is precisely what it exists to prevent
 next time.
 
+## Data Quality Assessment and unreviewed-suggestion tracking (2026-07-25)
+
+Two new read-only, searchable metadata fields, both written/refreshed by
+`INatSync.applyMatch` on every sync (not just first link), alongside the
+existing `iNatObservationId`/`iNatObservationUrl`:
+
+- `iNatQualityGrade` -- iNat's own `quality_grade` (`casual` / `needs_id`
+  / `research`), copied straight through. No new API call needed --
+  confirmed live it's already a plain top-level field on every observation
+  the existing pull already fetches.
+- `iNatSuggestedId` -- a short summary (e.g. `"escol suggests Florilinus
+  (leading)"`) when someone OTHER than the account owner has a CURRENT
+  identification naming a DIFFERENT taxon, dated after the owner's own
+  most recent identification on that observation (or the owner never
+  having identified it at all) -- i.e. a suggestion that's been sitting
+  there unanswered. Blank once answered (not a stale flag -- it's
+  recomputed fresh every sync from the current `identifications` array).
+  Also no new API call -- the full `identifications` array (user, taxon,
+  `current`, `category`, `created_at`) is already present in the standard
+  pull, confirmed live against real observations that actually have this
+  pattern (e.g. #381789507, where `escol` suggested `Florilinus` after the
+  owner's own last identification).
+
+Implementation: `describeUnrespondedSuggestion(observation, username)` in
+INatSync.lua, right after `candidateDiffersFromLocal`. Deliberately
+compares actual parsed instants via the existing `parseIsoTimestamp`
+helper, not the raw `created_at` strings -- confirmed live that different
+identifiers' timestamps carry different UTC offsets (`+05:30` vs
+`-04:00` on the very same observation), which a lexicographic string
+comparison can't reliably order. Distinct from the existing
+`INaturalist.observationAgreesWithMe` (which only asks whether the
+owner's OWN current identification, if any, agrees with the community) --
+this instead looks at what OTHER identifiers have said since the owner
+last weighed in, independent of the owner's own agreement status; it's
+computed unconditionally in `applyMatch`, not gated behind the
+`agrees`/`needsSpeciesUpdate` branching.
+
+Both fields are persisted metadata rather than a one-off report (unlike
+the mismatch HTML / pending-retry list, which are deliberately
+report-only because they represent transient sync-process state) --
+these instead describe a property of the observation itself, so the
+intended workflow is a Smart Collection (e.g. "iNat Suggested ID is not
+empty") to browse the queue directly in Lightroom, refreshed every time
+the sync runs.
+
+Regression tests added to `mock_test_inatsync.lua` (Cases 7e/7f/7g):
+quality grade + an unreviewed suggestion get written when someone else's
+current ID is both newer and different from the owner's; the flag clears
+once the owner has responded more recently than the suggestion; an
+identification that merely agrees with the owner's own current taxon is
+never flagged, even if it's dated later.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

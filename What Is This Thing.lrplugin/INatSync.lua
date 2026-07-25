@@ -679,6 +679,53 @@ local function candidateDiffersFromLocal(observation, group)
     return observedRank ~= localRank
 end
 
+-- Detects a "someone suggested a different ID and I haven't responded"
+-- state -- distinct from INaturalist.observationAgreesWithMe, which only
+-- asks whether the OWNER's own current identification (if any) agrees
+-- with the community. This instead looks for another identifier's CURRENT
+-- identification, dated after the owner's own most recent identification
+-- on this observation (or the owner never having identified it at all),
+-- whose taxon differs from what the owner last said -- i.e. someone moved
+-- the ID since the owner last looked, and the owner hasn't followed up.
+-- Needs actual chronological comparison, not lexicographic string
+-- comparison of the raw `created_at` values -- confirmed live these carry
+-- different per-identifier UTC offsets (e.g. "+05:30" vs "-04:00"), which
+-- a plain string comparison can't reliably order -- so this reuses
+-- parseIsoTimestamp (already relied on elsewhere in this file for exactly
+-- that reason) rather than comparing strings directly.
+-- Returns a short human-readable summary ("escol suggests Florilinus
+-- (leading)"), or nil if there's nothing unreviewed.
+local function describeUnrespondedSuggestion(observation, username)
+    local ownLatestTaxonName, ownLatestTime = nil, nil
+    for _, ident in ipairs(observation.identifications or {}) do
+        if ident.user and ident.user.login == username then
+            local t = parseIsoTimestamp(ident.created_at)
+            if t and (not ownLatestTime or t > ownLatestTime) then
+                ownLatestTime = t
+                ownLatestTaxonName = ident.taxon and ident.taxon.name
+            end
+        end
+    end
+
+    local best, bestTime = nil, nil
+    for _, ident in ipairs(observation.identifications or {}) do
+        if ident.current and ident.user and ident.user.login ~= username
+            and ident.taxon and ident.taxon.name ~= ownLatestTaxonName then
+            local t = parseIsoTimestamp(ident.created_at)
+            if t and (not ownLatestTime or t > ownLatestTime) and (not bestTime or t > bestTime) then
+                best = ident
+                bestTime = t
+            end
+        end
+    end
+
+    if not best then
+        return nil
+    end
+    return (best.user.login or "someone") .. " suggests " .. best.taxon.name
+        .. " (" .. tostring(best.category) .. ")"
+end
+
 -- Applies one resolved { group, observation } match: first absorbs any
 -- untagged sibling photos (see below), always writes the iNat link fields,
 -- and applies the metadata update via the existing
@@ -860,10 +907,14 @@ function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByF
         status = "linkedOnly"
     end
 
+    local suggestedId = describeUnrespondedSuggestion(observation, username)
+
     catalog:withWriteAccessDo("Link iNaturalist observation", function()
         for _, photo in ipairs(photos) do
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", tostring(observation.id))
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", observationUrl)
+            photo:setPropertyForPlugin(_PLUGIN, "iNatQualityGrade", observation.quality_grade)
+            photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", suggestedId)
         end
     end)
 

@@ -141,6 +141,42 @@ return {
             -- field. Written alongside iNatObservationId.
             readOnly = true,
         },
+        {
+            id = "iNatQualityGrade",
+            title = "iNat Quality Grade",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Written/refreshed on every sync (not just first link), since
+            -- it can improve (or regress) over time as identifications and
+            -- votes accrue on iNat's side. `allowPluginToSetOtherValues`
+            -- as a safety net for any future iNat grade this list doesn't
+            -- yet know about -- see the Taxon Rank field above for why an
+            -- undeclared enum value would otherwise render blank.
+            values = {
+                { value = nil, title = "(not synced)" },
+                { value = "casual", title = "Casual" },
+                { value = "needs_id", title = "Needs ID" },
+                { value = "research", title = "Research Grade" },
+            },
+            allowPluginToSetOtherValues = true,
+            readOnly = true,
+        },
+        {
+            id = "iNatSuggestedId",
+            title = "iNat Suggested ID (Unreviewed)",
+            dataType = "string",
+            searchable = true,
+            browsable = true,
+            -- Set when someone other than the account owner has proposed a
+            -- DIFFERENT taxon more recently than the owner's own last
+            -- identification on that observation (or the owner never
+            -- identified it at all) -- i.e. a suggestion sitting there
+            -- unanswered. Blank (not just untouched) once answered, so a
+            -- Smart Collection filtering on "is not empty" always reflects
+            -- the current state as of the last sync, not a stale flag.
+            readOnly = true,
+        },
 
         -- Taxon-level fields (2026-07-22): facts about the *species*, not
         -- the individual photo or observation -- cached in TaxonStore.lua
