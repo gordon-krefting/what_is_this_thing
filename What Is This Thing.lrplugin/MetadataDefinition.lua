@@ -108,6 +108,29 @@ return {
             },
         },
         {
+            id = "iNatRecoveredPlaceholder",
+            title = "iNat Recovered Placeholder",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Set by "Recover Missing Photos from iNaturalist" on every
+            -- photo it downloads/imports (never on a pre-existing sibling
+            -- in an absorbed group) -- iNat caps every stored photo at
+            -- 2048px on the long edge regardless of source, so these are
+            -- accepted lower-quality placeholders, not real backups. This
+            -- is the queue for a future manual pass replacing them with
+            -- higher-quality originals from Apple Photos once that
+            -- workflow exists -- filter a Smart Collection on this being
+            -- "Yes" to find them all. Same nil/"yes" enum shape as
+            -- approximateLocation above, for the same reason (nil must be
+            -- an explicit, selectable choice so a photo can be manually
+            -- un-flagged once replaced).
+            values = {
+                { value = nil, title = "No" },
+                { value = "yes", title = "Yes" },
+            },
+        },
+        {
             id = "observationId",
             title = "Observation ID",
             dataType = "string",

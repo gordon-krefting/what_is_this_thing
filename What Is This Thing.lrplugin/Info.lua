@@ -52,6 +52,10 @@ return {
             file = "FullSyncFromINaturalist.lua",
         },
         {
+            title = "Recover Missing Photos from iNaturalist",
+            file = "RecoverMissingPhotos.lua",
+        },
+        {
             title = "Show iNat Sync State (one-off)",
             file = "ShowINatSyncState.lua",
         },

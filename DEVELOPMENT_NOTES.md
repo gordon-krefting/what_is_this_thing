@@ -1856,6 +1856,263 @@ once the owner has responded more recently than the suggestion; an
 identification that merely agrees with the owner's own current taxon is
 never flagged, even if it's dated later.
 
+## "Recover Missing Photos from iNaturalist" (2026-07-25)
+
+Built the "orphan" recovery feature designed 2026-07-18 (see the removed
+deferred-item note below it used to live under) plus a second, related
+case surfaced in the same design conversation: an already-matched local
+group that's missing SOME of its photos (already detected by the
+existing mismatch check, tracked in `iNatPendingMismatchIds`, but never
+actually fixed before now -- only reported).
+
+Verified live during planning, before writing any code:
+- iNat caps every stored photo at 2048px on the long edge regardless of
+  upload source -- confirmed by downloading a real `original.jpg` and
+  checking its actual pixel dimensions matched the API's own
+  `original_dimensions`. A D7200 RAW original is ~15x more pixels; a
+  12MP iPhone photo (the user's other real source, phone-app
+  observations that were never local to begin with) ~4x. Accepted
+  tradeoff, not a blocker -- the user wants the best available image now
+  and will replace these with real files from Apple Photos in a
+  separate, deliberately out-of-scope future pass once that workflow
+  exists.
+- `photos[].url` (already used by the thumbnail feature) is always the
+  `square.jpg` thumbnail; iNat's storage uses a plain size-word-in-path
+  convention, confirmed live by substituting to `original.jpg` and
+  getting the full-size (capped) copy back.
+- `observation.location` is a `"lat,lng"` string; `observation.obscured`
+  flags a fuzzed location -- confirmed live against real observations in
+  both states.
+- No catalog-import mechanism existed anywhere in this codebase before
+  this feature -- every prior write operated on photos already in the
+  catalog. `catalog:addPhoto(filePath)` is genuinely new SDK surface for
+  this project and is **not yet confirmed live** -- first real thing to
+  test.
+
+Destination: `~/Photos/import/RecoveredFromINat` (user's explicit choice
+-- a labeled subfolder under the normal import root, not mixed into
+date-based import folders, not under the plugin's own
+`Photos/local/WhatIsThisThing` data directory). Filenames are generated
+deterministically (`iNat_<observationId>_<photoId>.jpg`), not from iNat's
+own `original_filename` -- already established elsewhere this session as
+frequently a placeholder/unreliable value.
+
+**Key design win, found during planning**: `INatSync.applyMatch` has no
+hidden dependency on its `group` argument pre-existing -- a synthetic
+`{ photos = importedPhotos }` group with nil `scientificName`/
+`iNatObservationId` just makes it correctly treat everything as new.
+So `INatRecovery.lua`'s own code only needed to (a) find candidates,
+(b) download + `addPhoto` + write GPS, then (c) hand off to the already-
+tested `applyMatch` for species/keywords/`iNatObservationId`/
+`iNatObservationUrl`/`iNatQualityGrade`/`iNatSuggestedId` -- none of that
+needed reimplementing. Similarly, a single
+`INatSync.pullAndMatch(username, nil, {}, onProgress)` full-history pull
+(exactly what "Full Sync from iNaturalist" already does) sources BOTH
+candidate lists in one pass: `report.noLocalMatchObservations` directly
+for the total-loss list, and `report.toApply` entries whose observation
+id is in the durable `iNatPendingMismatchIds` list for the partial-loss
+list (with `group.photos` being the real current local photos to absorb
+into) -- no changes needed to `INatSync.lua`'s matching logic itself.
+
+**New files**:
+- `INaturalist.lua` -- added `downloadOriginalPhoto(photoUrl, destPath)`,
+  substituting the URL's size segment to `original` and writing to a
+  given (not temp) path, alongside a private `toOriginalSizeUrl` helper.
+- `INatRecovery.lua` (new) -- `findCandidates`, `recoverTotalLoss`,
+  `recoverPartialLoss`, mirroring the `INatSync.lua`/`INatSyncRunner.lua`
+  logic-vs-orchestration split.
+- `RecoverMissingPhotos.lua` (new) -- thin command entry point: pulls
+  candidates under a progress scope, shows a confirmation dialog with
+  exact counts *before any file is written or the catalog touched* (real
+  downloads + catalog mutation are much harder to cheaply reverse than a
+  metadata-only sync), then processes both lists under a second
+  cancelable progress scope with the same per-item
+  `LrTasks.pcall`-wrapped resilience used elsewhere, logging to
+  `inat-recovery-log.txt` (same directory/append-only convention as the
+  sync log).
+- `MetadataDefinition.lua` -- added `iNatRecoveredPlaceholder` (enum,
+  nil/"yes", same shape as `approximateLocation`), set only on photos
+  this command actually imports -- the queue for the future
+  higher-quality-replacement pass via a Smart Collection.
+- `Info.lua` -- registered "Recover Missing Photos from iNaturalist".
+
+**A known, accepted residual risk** (not live-verified, documented
+in-code): `recoverPartialLoss` correlates `getObservationPhotoFilenames`
+(v2, the only source of filenames) against `observation.photos` (v1, the
+only source of download URLs) by ARRAY POSITION, since neither endpoint's
+photo entries carry a field cross-referencing the other, and the v2
+endpoint's authenticated fetch couldn't be scripted standalone outside
+Lightroom to verify ordering live. Mitigated, not eliminated: only
+proceeds when both lists are the same length, skipping (reported, not
+guessed at) otherwise, to avoid risking a duplicate import under a
+different synthetic filename. Recommend spot-checking a real multi-photo
+partial-loss recovery before trusting a large batch.
+
+Regression tests: new `mock_test_inatrecovery.lua` (10 cases) covering
+the URL substitution + download, `recoverTotalLoss` (full success,
+partial download failure, total failure), `recoverPartialLoss` (correct
+absorption of just the missing photo, and the skip-on-unreliable-data
+path), and `findCandidates`'s list-splitting. Full `lua5.4` syntax sweep
+and the whole existing suite still pass.
+
+## Recovery follow-up: added a limit field, and fixed a real live bug in partial-loss recovery (2026-07-25)
+
+Two things came out of the user's first live test.
+
+**Usability**: the confirmation dialog was all-or-nothing -- no way to
+try a handful of observations first before trusting a full batch,
+despite that being the explicit recommendation for `catalog:addPhoto`
+(new SDK surface for this project). Added an optional "Limit to the
+first N of each category" field to the confirmation dialog
+(`RecoverMissingPhotos.lua`, via `LrView`/`LrBinding`, same pattern as
+`promptForUsername`) -- blank means no limit (unchanged default
+behavior), a number truncates both `candidates.totalLoss` and
+`candidates.partialLoss` to their first N entries before the recovery
+loop runs.
+
+**Real bug, confirmed live**: total-loss recovery worked correctly, but
+partial-loss did not -- the recovered photo downloaded fine but got
+neither its local `observationId` nor any species tag, even though the
+group's `iNatObservationId` link field WAS written. Root cause:
+`INatSync.applyMatch`'s "does the species need updating" check
+(`needsSpeciesUpdate`/`needsAncestryRepair`) only fires when ITS OWN
+absorption logic (via `photosByFilename`, never passed by
+`recoverPartialLoss`) found something, or the group's already-recorded
+`scientificName` disagrees with iNat's current taxon. Since
+`recoverPartialLoss` appends the newly-downloaded photo to `group.photos`
+itself, BEFORE calling `applyMatch`, an already-correctly-tagged group
+(the normal case -- the surviving photo was already properly identified)
+looks completely unchanged to that check. `applyMatch` fell through to
+plain `"linkedOnly"`, which only ever writes the unconditional link
+fields (`iNatObservationId`/`iNatObservationUrl`/`iNatQualityGrade`/
+`iNatSuggestedId`) -- `KeywordWriter.applyIdentification` (the only thing
+that writes local `observationId` and species/keywords) was never
+reached for the new photo at all.
+
+Fix: `recoverPartialLoss` now calls `KeywordWriter.applyIdentification`
+directly on the whole (now-updated) group immediately after appending
+the recovered photo -- reusing the same `observationAgreesWithMe` gate
+`applyMatch` itself uses, so a genuine disagreement is still respected --
+before still calling `applyMatch` afterward for the link-field
+writes/mismatch recheck. Safe/idempotent for the already-correctly-tagged
+sibling(s) too: `applyIdentification`'s own `findExistingObservationId`
+reuses their existing local `observationId` rather than minting a new
+one, and `removeOldChildKeywords` no-ops the keyword re-add.
+`recoverTotalLoss` doesn't have this problem -- every photo in that group
+is brand new, so `group.scientificName` starts nil and reliably differs
+from iNat's taxon, correctly triggering `needsSpeciesUpdate` on its own.
+
+Regression test (`mock_test_inatrecovery.lua` Case 8b) needed real care
+to actually exercise the bug, not just LOOK like it did: the first
+version of the fixture gave the existing photo a species-name property
+but no real nested ancestry keyword chain, which meant `applyMatch`'s
+SEPARATE `needsAncestryRepair` branch fired instead and called
+`applyIdentification` anyway -- masking the bug regardless of whether the
+actual fix was present (confirmed by deliberately stripping the fix and
+seeing the test still pass). Building a genuinely separate
+`makeKeyword("Species ID", ...)` root to fix that made it worse in a
+different way: `findParentKeyword` returns the FIRST "Species ID" keyword
+in `catalog:getKeywords()` iteration order, which by Case 8 was already
+the one earlier cases (4-7) had created via the real
+`mockCatalog:createKeyword` reuse-by-name path -- a second,
+separately-instantiated root object was invisible to it, so
+`hasFullAncestry` still (correctly, for what was actually on the mock
+catalog) reported incomplete ancestry. Fixed by reusing
+`mockCatalog:createKeyword` itself for the fixture's keyword chain,
+exactly as production code would, rather than hand-constructing keyword
+objects. Verified the final test is meaningful (not vacuously passing)
+the same way the sync-cursor tests were earlier in this project: stripped
+the fix, confirmed the specific assertion failed with the exact bug
+shape, then restored it.
+
+## Recovery follow-up #2: recovered partial-loss observations kept reappearing (2026-07-25)
+
+Confirmed live after a couple of real recovery runs: two observations
+that had genuinely already been recovered (photos downloaded, absorbed,
+species-tagged -- confirmed correct on disk) kept showing up again as
+"missing some of their photos" candidates on every subsequent run,
+forever.
+
+Root cause, in two parts, both needed together:
+
+1. `INatSync.applyMatch` does NOT clear the durable pending-mismatch list
+   itself -- that's always been the CALLER's job. `INatSyncRunner.lua`'s
+   own apply loop calls `INatSync.markMismatchOutcome(...)` based on
+   applyMatch's returned `checkedMismatch`/`mismatch` fields; both
+   `INatRecovery.recoverPartialLoss` and `recoverTotalLoss` were calling
+   `applyMatch` and discarding its return value entirely, so a resolved
+   mismatch never got removed from `iNatPendingMismatchIds` -- and,
+   separately, a genuine leftover shortfall (e.g. from a partial download
+   failure in `recoverTotalLoss`) never got ADDED to it either, silently
+   vanishing from view rather than being retried later.
+2. Even once the return value is captured, `recoverPartialLoss`'s call
+   needed `forceRecheck = true` explicitly passed to `applyMatch` --
+   without it, `shouldCheckMismatch` (`forceRecheck or not wasAlreadyLinked
+   or ...`) evaluates to false for an already-linked group (which, by
+   definition, every partial-loss candidate is), so `applyMatch` would
+   skip the mismatch check entirely and `checkedMismatch` would always be
+   false -- making part 1's fix silently inert for the exact case it was
+   meant to fix. `recoverTotalLoss` doesn't need this: its synthetic
+   `{ photos = imported }` group is never "already linked", so
+   `shouldCheckMismatch` is naturally true there already.
+
+Fix: both functions now capture `applyMatch`'s result and call
+`INatSync.markMismatchOutcome(observation.id, result.mismatch ~= nil)`
+when `result.checkedMismatch` is true; `recoverPartialLoss`'s call now
+passes `forceRecheck = true` as the 6th argument.
+
+Regression tests: `mock_test_inatrecovery.lua` Case 8c (recovering a
+partial-loss observation clears it from `iNatPendingMismatchIds` once
+resolved) and Case 6b (a genuine leftover shortfall from a partial
+download failure in `recoverTotalLoss` gets ADDED to the list, not
+silently dropped). Both needed real `v2FilenamesByObservationId` fixture
+data configured for their observations -- without it, the mock's
+`getObservationPhotoFilenames` returns an empty-but-non-nil filename
+list, and `applyMatch`'s own `#iNatFilenames > #photos` mismatch
+condition never fires regardless of what's under test, which would have
+made these cases pass vacuously exactly like the Case 8b masking issue
+above. Verified meaningful the same way: stripped both pieces of the fix
+together, confirmed Case 6b failed with the exact "silently dropped"
+shape, then restored it.
+
+## Recovery follow-up #3: recovered photos had no capture timestamp (2026-07-25)
+
+Confirmed live: recovered photos came in with no capture date at all.
+iNat's downloaded copy is a re-processed/resized JPEG (see the 2048px-cap
+note) and evidently doesn't reliably carry usable EXIF
+`DateTimeOriginal` -- and even setting that aside, nothing in
+`INatRecovery.lua` ever wrote a capture date to begin with, only GPS.
+
+`dateTimeOriginal` itself is read-only via the SDK (EXIF-derived, not
+settable by a plugin); the writable counterpart is `dateCreated`, which
+per the SDK docs accepts a plain ISO 8601 string -- exactly the shape
+`observation.time_observed_at` is already in, so no reformatting is
+needed. Added `applyCaptureDate(photo, observation)` in `INatRecovery.lua`
+(same file/pattern as the existing `applyLocation`), called alongside it
+in `importOnePhoto`'s write transaction. **Not yet confirmed live** --
+same caveat as `catalog:addPhoto` itself; verify a freshly-recovered
+photo actually shows a capture date after this.
+
+Regression test: `mock_test_inatrecovery.lua` Case 5 now also asserts
+`dateCreated` was written from `observation.time_observed_at`.
+
+Follow-up, same session: a field audit turned up two more available-but-
+unused pieces of data, already present in the standard pull (confirmed
+live, no extra API call needed) -- `photos[].attribution` (a ready-made
+copyright string, e.g. `"(c) Gordon Krefting, some rights reserved (CC
+BY-NC)"`) and `observation.place_guess` (a free-text location
+description). Added `applyCopyright(photo, photoEntry)` writing
+`attribution` to the `copyright` raw metadata field, same
+transaction/pattern as `applyLocation`/`applyCaptureDate` -- recovered
+photos otherwise carried zero copyright info at all, unlike a normal
+camera import. `place_guess` deliberately NOT added -- it's a single
+unstructured string, not clean city/state/country data, so mapping it
+onto Lightroom's IPTC location fields would be loose at best; left for a
+future ask rather than guessed at now.
+
+Regression test: `mock_test_inatrecovery.lua` Case 5 now also asserts
+`copyright` was written from the photo's `attribution` string.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
@@ -1884,19 +2141,6 @@ never flagged, even if it's dated later.
   pass, independent of the cursor, that re-verifies already-linked
   observations' current `updated_at` against what was last actually
   applied locally, rather than trusting the incremental delta alone.
-- **Recovering "orphan" observations** (made in the iNat phone app, or
-  from photos living in Apple Photos -- never imported into Lightroom;
-  distinct from the false-collision case above, which involves photos
-  that *are* already in the catalog). Design agreed 2026-07-18, not yet
-  built: download the photo directly from the observation's own photo
-  URLs (no separate lookup needed) and import it into the catalog **next
-  to normal imports** -- this case has no matching ambiguity (clean 1:1),
-  so write observation id/species/GPS/date immediately at import time.
-  Caveat: iNat serves a resized/compressed JPEG copy of whatever was
-  uploaded, not a RAW original, so these will be visibly lower quality
-  than native camera captures sitting next to them -- likely worth
-  marking them distinctly, e.g. a `Recovered from iNat` keyword or a
-  dedicated subfolder/collection.
 - Deleted-observation detection (a separate, coarser periodic diff pass,
   see "Sync from iNaturalist" section above).
 - `growthHabit` enum conversion (see "Open items" above).
