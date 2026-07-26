@@ -2113,6 +2113,57 @@ future ask rather than guessed at now.
 Regression test: `mock_test_inatrecovery.lua` Case 5 now also asserts
 `copyright` was written from the photo's `attribution` string.
 
+## A plugin-shipped Metadata panel view preset (2026-07-26)
+
+The user had been maintaining a personal, per-machine custom Metadata
+panel preset ("Plant Book") to see this plugin's own fields together.
+Confirmed via a real working example (mikeyk730's
+Lightroom-CR2-White-Balance plugin) that the SDK has a dedicated,
+documented mechanism for this that ships WITH the plugin instead --
+`LrMetadataTagsetFactory` in `Info.lua`, a sibling declaration to
+`LrMetadataProvider`, pointing at a file that returns a single tagset
+table (`id`, `title`, `items`). It appears in the same Metadata panel
+dropdown as Default/EXIF/IPTC/etc. and any personal custom presets, but
+is available automatically to anyone with the plugin installed -- no
+per-machine setup, lives in source control with everything else.
+
+Added `MetadataTagsetFactory.lua`, registered via
+`LrMetadataTagsetFactory = "MetadataTagsetFactory.lua"` in `Info.lua`.
+Titled "What is this Thing?" (matching `LrPluginName`, per the user's
+request). Groups all 16 of this plugin's custom fields (from
+`MetadataDefinition.lua`) into four labeled sections -- Identification,
+Species Info, iNaturalist Link, Grouping & Flags -- via
+`{ 'com.adobe.label', label = "..." }` pseudo-field entries (also
+confirmed via the same real example), plus `com.adobe.filename` at the
+top for context while reviewing. Custom field ids in `items` must be
+fully qualified with this plugin's own `LrToolkitIdentifier`
+("org.krefting.whatisthisthing.<fieldId>") -- confirmed via the same
+example, which uses this exact form for its own fields -- hardcoded as
+literal strings rather than built from `_PLUGIN.id`, since a
+tagset-factory file's execution context isn't necessarily the same as a
+command file's.
+
+**Not yet confirmed live** -- first thing to check: does "What is this
+Thing?" actually appear in the Metadata panel's dropdown, correctly
+grouped and labeled. No meaningful way to unit-test this (pure static
+declarative data, no logic) -- verified via `lua5.4 -e` dumping the
+returned table and eyeballing the structure instead.
+
+Follow-up, same session: added a "Photo" section at the top with 10
+built-in fields (filename, folder, capture date, GPS, cropped/original
+dimensions, title, caption, rating, copyright), fetched from the SDK's
+own predefined-field list rather than guessed. Three naming decisions
+worth remembering:
+- `dateCreated`, not `dateTimeOriginal` -- the latter is read-only,
+  EXIF-derived, and confirmed live to show blank on recovered photos
+  (see the capture-timestamp fix above); `dateCreated` is the field this
+  plugin actually writes and is guaranteed populated either way.
+- No true "file path" field exists in the SDK's field list -- `folder`
+  (the containing folder's NAME only, not a full path) is the closest
+  available.
+- IPTC has one Caption/Description field, exposed as `caption` -- there's
+  no separate "description" field to add.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

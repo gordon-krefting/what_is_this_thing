@@ -5,6 +5,7 @@ return {
     LrPluginName = "What is this Thing?",
 
     LrMetadataProvider = "MetadataDefinition.lua",
+    LrMetadataTagsetFactory = "MetadataTagsetFactory.lua",
 
     LrExportMenuItems = {
         {
