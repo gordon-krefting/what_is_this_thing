@@ -160,14 +160,31 @@ local WIDENING_TIME_TOLERANCE_SECONDS = 12 * 3600
 -- outcome caused by a genuine race for one candidate group (see
 -- pullAndMatch's `claimedGroups`) can say who won it, instead of just
 -- silently reporting "no match" with no way to tell why.
+-- Third return value: diagnostic only, NOT used for matching -- the
+-- closest same-scientific-name local group that was found but fell
+-- OUTSIDE even the widened tolerance (nil if no same-named group exists
+-- locally at all, or if every same-named group already qualified/got
+-- claimed). Confirmed live as necessary 2026-07-27: a "no_local_match"
+-- outcome with an empty claimedAway (so describeClaimedAway had nothing
+-- to say) left no way to tell whether NO local group shared the
+-- observation's species at all, or one existed but was just outside the
+-- window -- exactly the "camera-clock-skew rescue" case this widening
+-- exists for, silently not firing with no trace. Real live case: iNat's
+-- own `time_observed_at` for observation #385810257 carried an internal
+-- inconsistency (embedded "-04:00" offset vs. its own separately-
+-- reported `time_zone_offset` of "-05:00", the latter matching the
+-- camera's actual GPS-verified capture instant) -- so the observation's
+-- parsed target time was already off by over an hour before local
+-- matching even started.
 local function widenCandidatesByScientificName(candidateGroups, groupsByScientificName, observation, targetTime, claimedGroups)
     local claimedAway = {}
+    local closestMiss = nil
     if not (observation.taxon and observation.taxon.name and targetTime) then
-        return candidateGroups, claimedAway
+        return candidateGroups, claimedAway, closestMiss
     end
     local sameNameGroups = groupsByScientificName[observation.taxon.name]
     if not sameNameGroups then
-        return candidateGroups, claimedAway
+        return candidateGroups, claimedAway, closestMiss
     end
 
     local alreadyCandidate = {}
@@ -176,18 +193,22 @@ local function widenCandidatesByScientificName(candidateGroups, groupsByScientif
     end
 
     for _, g in ipairs(sameNameGroups) do
-        if not alreadyCandidate[g] and g.time
-            and math.abs(g.time - targetTime) <= WIDENING_TIME_TOLERANCE_SECONDS then
-            if claimedGroups[g] then
-                table.insert(claimedAway, { group = g, claimedBy = claimedGroups[g] })
-            else
-                table.insert(candidateGroups, g)
-                alreadyCandidate[g] = true
+        if not alreadyCandidate[g] and g.time then
+            local delta = math.abs(g.time - targetTime)
+            if delta <= WIDENING_TIME_TOLERANCE_SECONDS then
+                if claimedGroups[g] then
+                    table.insert(claimedAway, { group = g, claimedBy = claimedGroups[g] })
+                else
+                    table.insert(candidateGroups, g)
+                    alreadyCandidate[g] = true
+                end
+            elseif not closestMiss or delta < closestMiss.deltaSeconds then
+                closestMiss = { deltaSeconds = delta, group = g }
             end
         end
     end
 
-    return candidateGroups, claimedAway
+    return candidateGroups, claimedAway, closestMiss
 end
 
 -- Turns a `claimedAway` list ({ group, claimedBy }, from the primary
@@ -218,6 +239,32 @@ local function describeClaimedAway(claimedAway)
         end
     end
     return table.concat(parts, "; ")
+end
+
+-- Human-readable description of widenCandidatesByScientificName's
+-- diagnostic-only closestMiss return value -- e.g. "closest same-species
+-- local match (DSC_2483.NEF) is 1h 0m away, outside the 12h widening
+-- tolerance". Only ever consulted when describeClaimedAway found nothing
+-- to say (see pullAndMatch), so this is specifically for the "a same-
+-- named local group exists, but even widening didn't reach it" case --
+-- as opposed to "no local group shares this species at all", which
+-- stays a bare "no_local_match" with no further detail, since there's
+-- nothing more specific to say. Returns nil if there's nothing to
+-- report.
+local function describeClosestMiss(closestMiss)
+    if not closestMiss then
+        return nil
+    end
+    local filenames = {}
+    for _, photo in ipairs(closestMiss.group.photos) do
+        table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
+    end
+    local hours = math.floor(closestMiss.deltaSeconds / 3600)
+    local minutes = math.floor((closestMiss.deltaSeconds % 3600) / 60)
+    return string.format(
+        "closest same-species local match (%s) is %dh %dm away, outside the %dh widening tolerance",
+        table.concat(filenames, ", "), hours, minutes, WIDENING_TIME_TOLERANCE_SECONDS / 3600
+    )
 end
 
 -- Groups every photo in the catalog by its local `observationId` (photos
@@ -574,11 +621,13 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                 -- already-working match into an unnecessary collision with
                 -- some unrelated same-species-same-day group elsewhere in
                 -- the catalog.
+                local closestMiss = nil
                 if #candidateGroups == 0 then
-                    local widenedGroups, widenedClaimedAway = widenCandidatesByScientificName(
+                    local widenedGroups, widenedClaimedAway, widenedClosestMiss = widenCandidatesByScientificName(
                         candidateGroups, groupsByScientificName, observation, time, claimedGroups
                     )
                     candidateGroups = widenedGroups
+                    closestMiss = widenedClosestMiss
                     for _, entry in ipairs(widenedClaimedAway) do
                         table.insert(claimedAway, entry)
                     end
@@ -586,7 +635,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
 
                 if #candidateGroups == 0 then
                     table.insert(noLocalMatchObservations, observation)
-                    noLocalMatchReasons[observation.id] = describeClaimedAway(claimedAway)
+                    noLocalMatchReasons[observation.id] = describeClaimedAway(claimedAway) or describeClosestMiss(closestMiss)
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
                     claimedGroups[candidateGroups[1]] = observation

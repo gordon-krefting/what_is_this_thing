@@ -175,67 +175,95 @@ LrTasks.startAsyncTask(function()
     local runLog = {}
     local counts = { imported = 0, absorbed = 0, photosImported = 0, failed = 0, skipped = 0 }
 
+    -- workScope is created BEFORE the outer LrTasks.pcall below and
+    -- :done() is called unconditionally right after it returns --
+    -- mirrors INatSyncRunner.lua's own established hardening (see its
+    -- comment on the same pattern) so that ANY unexpected error partway
+    -- through this loop (a view/dialog quirk, an SDK edge case, anything
+    -- not already caught by the per-item LrTasks.pcall calls below)
+    -- still reaches workScope:done() -- confirmed live as a real gap:
+    -- this file didn't have that outer safety net, and Lightroom's
+    -- dock/progress indicator stayed stuck open after a crash elsewhere
+    -- in this same run.
     local workScope = LrProgressScope({ title = "Recover Missing Photos from iNaturalist" })
     workScope:setCancelable(true)
-    local totalItems = #candidates.totalLoss + #candidates.partialLoss
-    local itemsDone = 0
 
-    for _, observation in ipairs(candidates.totalLoss) do
-        if workScope:isCanceled() then
-            break
-        end
-        workScope:setCaption("Recovering #" .. tostring(observation.id) .. "...")
-        local ok, result = LrTasks.pcall(INatRecovery.recoverTotalLoss, observation, username, destDir)
-        if ok and result.applied then
-            counts.imported = counts.imported + 1
-            counts.photosImported = counts.photosImported + result.imported
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "imported", detail = result.imported .. " photo(s)" })
-        elseif ok then
-            counts.failed = counts.failed + 1
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "failed", detail = "no photos could be downloaded" })
-        else
-            counts.failed = counts.failed + 1
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "failed", detail = tostring(result) })
-        end
-        itemsDone = itemsDone + 1
-        workScope:setPortionComplete(itemsDone, totalItems)
-    end
+    local runOk, runErr = LrTasks.pcall(function()
+        local totalItems = #candidates.totalLoss + #candidates.partialLoss
+        local itemsDone = 0
 
-    for _, match in ipairs(candidates.partialLoss) do
-        if workScope:isCanceled() then
-            break
+        for _, observation in ipairs(candidates.totalLoss) do
+            if workScope:isCanceled() then
+                break
+            end
+            workScope:setCaption("Recovering #" .. tostring(observation.id) .. "...")
+            local ok, result = LrTasks.pcall(INatRecovery.recoverTotalLoss, observation, username, destDir)
+            if ok and result.applied then
+                counts.imported = counts.imported + 1
+                counts.photosImported = counts.photosImported + result.imported
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "imported", detail = result.imported .. " photo(s)" })
+            elseif ok then
+                counts.failed = counts.failed + 1
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "failed", detail = "no photos could be downloaded" })
+            else
+                counts.failed = counts.failed + 1
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "failed", detail = tostring(result) })
+            end
+            itemsDone = itemsDone + 1
+            workScope:setPortionComplete(itemsDone, totalItems)
         end
-        local observation = match.observation
-        workScope:setCaption("Recovering #" .. tostring(observation.id) .. "...")
-        local ok, result = LrTasks.pcall(INatRecovery.recoverPartialLoss, match.group, observation, username, destDir)
-        if ok and result.applied then
-            counts.absorbed = counts.absorbed + 1
-            counts.photosImported = counts.photosImported + result.imported
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "absorbed", detail = result.imported .. " photo(s)" })
-        elseif ok and result.skipped then
-            counts.skipped = counts.skipped + 1
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "skipped", detail = result.skipped })
-        elseif ok then
-            counts.failed = counts.failed + 1
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "failed", detail = "no photos could be downloaded" })
-        else
-            counts.failed = counts.failed + 1
-            table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
-                outcome = "failed", detail = tostring(result) })
+
+        for _, match in ipairs(candidates.partialLoss) do
+            if workScope:isCanceled() then
+                break
+            end
+            local observation = match.observation
+            workScope:setCaption("Recovering #" .. tostring(observation.id) .. "...")
+            local ok, result = LrTasks.pcall(INatRecovery.recoverPartialLoss, match.group, observation, username, destDir)
+            if ok and result.applied then
+                counts.absorbed = counts.absorbed + 1
+                counts.photosImported = counts.photosImported + result.imported
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "absorbed", detail = result.imported .. " photo(s)" })
+            elseif ok and result.skipped then
+                counts.skipped = counts.skipped + 1
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "skipped", detail = result.skipped })
+            elseif ok then
+                counts.failed = counts.failed + 1
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "failed", detail = "no photos could be downloaded" })
+            else
+                counts.failed = counts.failed + 1
+                table.insert(runLog, { observationId = observation.id, taxonName = observation.taxon and observation.taxon.name,
+                    outcome = "failed", detail = tostring(result) })
+            end
+            itemsDone = itemsDone + 1
+            workScope:setPortionComplete(itemsDone, totalItems)
         end
-        itemsDone = itemsDone + 1
-        workScope:setPortionComplete(itemsDone, totalItems)
-    end
+    end)
 
     workScope:done()
 
+    -- Write whatever the log accumulated regardless of runOk -- a partial
+    -- run that hit an unexpected error still did real work worth a
+    -- record, not just the happy-path summary.
     local logPath = writeRecoveryLog(runLog)
+
+    if not runOk then
+        LrDialogs.message(
+            "Recover Missing Photos from iNaturalist",
+            "Something went wrong partway through recovery:\n\n" .. tostring(runErr)
+                .. "\n\nAny work already completed was saved" .. (logPath and (" -- see " .. logPath) or "")
+                .. ". Run the command again to continue.",
+            "critical"
+        )
+        return
+    end
+
     local summary = string.format(
         "%d new observation(s) imported (%d photo(s) total)\n%d observation(s) absorbed missing photo(s)\n"
             .. "%d skipped (unreliable filename data)\n%d failed",

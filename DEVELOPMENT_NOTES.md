@@ -2262,6 +2262,108 @@ Observation-ID still treated as distinct candidates (confirms the
 grouping key is Observation ID, not scientificName), and a canceled
 dialog writing nothing.
 
+## Diagnosed a real "no_local_match" case, found an iNat data-quality bug, and closed a diagnostic gap (2026-07-27)
+
+The user asked why observation #385810257 (Uroleucon obscuricaudatum,
+created ~2 hours earlier from an export/upload of DSC_2483.NEF) wasn't
+linked after two sync runs. The full per-observation sync log confirmed
+it as a genuine `no_local_match` (not a pull/cursor issue -- it was
+present in the pull both times), with no `claimedAwayReason` detail at
+all.
+
+Direct investigation (SQLite against the live `.lrcat`, confirming the
+established `AgSearchablePhotoProperty`/`AgPhotoPropertySpec` join
+pattern from much earlier in this project; `exiftool` against the
+actual NEF file) found the real cause: **iNat's own `time_observed_at`
+for this observation carries an internal inconsistency**. Its embedded
+offset is `-04:00` (`America/New_York` daylight time), but the
+observation's own separately-reported `time_zone_offset` field says
+`-05:00` -- and `-05:00` is also what the camera's own GPS-verified
+capture instant actually confirms (`GPS Date/Time: 2026:07:27
+21:25:21Z` vs. local `16:25:21` -- exactly 5 hours, i.e. true `-05:00`).
+iNat's `time_observed_at`, taken at face value, is thus **1h 21s off**
+from the true capture instant -- comfortably enough to blow the
+matching algorithm's normal tight/truncated tolerances, though nowhere
+near the 12-hour scientific-name widening fallback that exists
+specifically to rescue clock-skew cases like this.
+
+That raised the real question: why didn't the 12-hour widening rescue
+a 1h21s gap? Investigating further would need the actual live-computed
+`targetTime` and the local group's own `g.time` (Lightroom's per-photo
+timezone assignment for the NEF, which -- per this project's own
+long-established finding -- is not knowable from outside a live
+Lightroom process). Rather than guess further, closed the actual gap
+that made this undiagnosable in the first place:
+`widenCandidatesByScientificName` now returns a third, diagnostic-only
+value -- the closest same-scientific-name local group that was found
+but fell outside even the widened tolerance, if any -- and
+`pullAndMatch` surfaces it via a new `describeClosestMiss` helper
+whenever `describeClaimedAway` has nothing to say. A future
+`no_local_match` log line for a case like this will now read something
+like `closest same-species local match (DSC_2483.NEF) is 1h 21m away,
+outside the 12h widening tolerance` instead of giving no clue whether
+a same-named local group even exists. Next actual sync run will reveal
+the true live delta and settle whether this specific case needed a
+wider tolerance or was hitting something else entirely.
+
+Regression test: `mock_test_inatsync.lua` Case 12c (already covering
+"same scientific name but 20 hours apart, correctly stays unmatched")
+extended to also assert the new diagnostic names the closest local
+match and the tolerance it fell outside of, rather than just checking
+the observation landed in `noLocalMatchObservations` with no further
+detail. Full existing suite re-run to confirm the added third return
+value on `widenCandidatesByScientificName` didn't disturb any existing
+caller.
+
+**Follow-up, same session**: the user's third sync run pulled only 1
+observation, and it wasn't #385810257 -- confirming this is actually the
+already-documented "cursor-orphaned observations" gap (see the entry
+above from 2026-07-24), not a new issue: the incremental cursor had
+advanced past this observation's own `updated_at` (nothing tracks a
+`no_local_match` outcome for retry, unlike mismatches or apply-
+failures), so it had simply stopped being pulled at all. "Full Sync from
+iNaturalist" is the correct fix -- not because full vs. incremental
+changes the matching logic, but because Full Sync ignores the cursor
+entirely and is the only way to force a re-pull right now.
+
+## Fixed a stuck-progress-bar crash-safety gap in "Recover Missing Photos" (2026-07-27)
+
+While investigating the above, the user separately reported Lightroom's
+dock icon and in-app progress indicator staying stuck after running
+recovery. Traced to `RecoverMissingPhotos.lua` not having the same
+outer-`LrTasks.pcall`-around-the-whole-loop hardening
+`INatSyncRunner.lua` already has (see its own comment: "wrapped in one
+outer pcall so that ANY unexpected error partway through... still
+reaches progressScope:done()"). The per-item recovery calls inside the
+loop were already individually `LrTasks.pcall`-wrapped, but several
+un-guarded calls surrounded them (`workScope:isCanceled()`,
+`:setCaption()`, `:setPortionComplete()`, `recoveryDestDir()`) -- any
+unexpected error among those would leave `workScope` permanently open,
+with no way to close it from outside Lightroom short of a restart.
+
+Fixed by mirroring `INatSyncRunner.lua`'s exact pattern: `workScope` is
+now created BEFORE an outer `LrTasks.pcall` wraps the whole two-loop
+body, and `workScope:done()` is called unconditionally right after,
+regardless of success. On failure, shows a clear error (matching
+`INatSyncRunner.lua`'s own wording) instead of the normal summary --
+and, as a small improvement beyond what `INatSyncRunner.lua` does,
+still writes whatever `runLog` accumulated before the crash to
+`inat-recovery-log.txt`, since a partial run did real work worth a
+record, not just the happy path.
+
+Not covered by a new dedicated test -- the fix mirrors an already-
+proven, already-tested pattern (`INatSyncRunner.lua`'s identical
+hardening has its own passing "progressScope:done() still fires after
+an uncaught error mid-run" test in `mock_test_syncfrominaturalist.lua`),
+and building an equivalent mock harness for this file's much deeper
+`INatRecovery`/`INatSync`/`INaturalist` dofile chain would be
+substantial new scaffolding for a narrow, mechanical, structurally
+low-risk change. Verified via the full existing suite (no regressions)
+and careful manual re-reading of the restructured control flow instead.
+**Practical note for the user**: if a stuck progress bar is ever seen
+again after this fix, it likely means a genuinely new, not-yet-hardened
+code path -- worth reporting rather than assuming it'll clear itself.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
