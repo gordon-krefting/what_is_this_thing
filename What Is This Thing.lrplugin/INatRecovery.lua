@@ -11,6 +11,7 @@
 local LrApplication = import 'LrApplication'
 local LrPathUtils = import 'LrPathUtils'
 local LrFileUtils = import 'LrFileUtils'
+local LrTasks = import 'LrTasks'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
@@ -96,14 +97,98 @@ end
 -- writable counterpart is `dateCreated`, which the SDK docs describe as
 -- accepting a plain ISO 8601 string, exactly the shape
 -- observation.time_observed_at is already in (e.g.
--- "2008-11-23T12:41:05-08:00"), so no reformatting is needed. NOT yet
--- confirmed live -- same caveat as catalog:addPhoto itself; verify a
--- recovered photo actually shows a capture date after this.
+-- "2008-11-23T12:41:05-08:00"), so no reformatting is needed. Kept as a
+-- belt-and-suspenders fallback now that applyEmbeddedExif (below) writes
+-- the real EXIF fields too -- this still fires even on a machine with no
+-- exiftool available, or if the exiftool write silently no-ops.
 local function applyCaptureDate(photo, observation)
     if not observation.time_observed_at then
         return
     end
     photo:setRawMetadata("dateCreated", observation.time_observed_at)
+end
+
+-- GUI-launched apps (Lightroom included) don't inherit an interactive
+-- shell's PATH, so a bare "exiftool" lookup fails even when it's on the
+-- user's normal PATH -- already discovered building geotag_from_gpx.py's
+-- own find_exiftool(); same explicit-path fallback list, since there's no
+-- Lua equivalent of shutil.which that would fare any better here.
+local function findExiftool()
+    for _, candidate in ipairs({ "/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool" }) do
+        if LrFileUtils.exists(candidate) then
+            return candidate
+        end
+    end
+    return nil
+end
+
+local function shellQuote(str)
+    return "'" .. tostring(str):gsub("'", "'\\''") .. "'"
+end
+
+-- Splits an iNat time_observed_at string (e.g.
+-- "2026-07-28T10:38:28-04:00") into EXIF's own "YYYY:MM:DD HH:MM:SS"
+-- local-clock format and its UTC offset in the "+HH:MM"/"-HH:MM" form
+-- EXIF 2.31's OffsetTimeOriginal/OffsetTimeDigitized tags expect -- pure
+-- reformatting, no timezone conversion, since both pieces already come
+-- straight out of the same source string.
+local function splitObservedAt(timeObservedAt)
+    local y, mo, d, h, mi, s, offset = timeObservedAt:match(
+        "^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)(.*)$"
+    )
+    if not y then
+        return nil
+    end
+    if offset == "Z" or offset == "" then
+        offset = "+00:00"
+    end
+    return string.format("%s:%s:%s %s:%s:%s", y, mo, d, h, mi, s), offset
+end
+
+-- Writes REAL embedded EXIF DateTimeOriginal/DateTimeDigitized (plus their
+-- Offset* companions) directly into the downloaded JPEG, on disk, BEFORE
+-- catalog:addPhoto ever sees it -- dateTimeOriginal is read-only via the
+-- SDK (see applyCaptureDate's comment above), so the only way for a
+-- recovered photo to ever show a real "Date Time Original"/"Date Time
+-- Digitized" in Lightroom's own metadata panel (not just the SDK-level
+-- dateCreated field) is to put it in the file's own EXIF before import.
+-- Uses observation.time_observed_at for both fields -- iNat only exposes
+-- one combined timestamp per observation, not separate taken/digitized
+-- moments. Deliberately does NOT touch ModifyDate/DateTime -- that field
+-- means "last modified," which downloading+writing right now genuinely is.
+-- Uses -overwrite_original (unlike geotag_from_gpx.py's GPX pass, which
+-- deliberately keeps a backup of irreplaceable camera originals) since
+-- this is a disposable placeholder copy, not the only copy of anything --
+-- an "_original" backup here would just be clutter.
+-- Confirmed live 2026-07-28: a real recovery run produced a file with
+-- correct DateTimeOriginal/CreateDate/Offset* values (checked directly
+-- with exiftool). Same run also confirmed exiftool is found at
+-- /opt/homebrew/bin/exiftool on this machine.
+local function applyEmbeddedExif(destPath, observation)
+    if not observation.time_observed_at then
+        return
+    end
+    local exifDateTime, offset = splitObservedAt(observation.time_observed_at)
+    if not exifDateTime then
+        return
+    end
+
+    local exiftool = findExiftool()
+    if not exiftool then
+        return
+    end
+
+    local cmd = table.concat({
+        shellQuote(exiftool),
+        "-overwrite_original",
+        "-DateTimeOriginal=" .. shellQuote(exifDateTime),
+        "-OffsetTimeOriginal=" .. shellQuote(offset),
+        "-CreateDate=" .. shellQuote(exifDateTime),
+        "-OffsetTimeDigitized=" .. shellQuote(offset),
+        shellQuote(destPath),
+        "> /dev/null 2>&1",
+    }, " ")
+    LrTasks.execute(cmd)
 end
 
 -- Recovered photos otherwise carry NO copyright metadata at all, unlike
@@ -139,6 +224,12 @@ local function importOnePhoto(catalog, observation, photoEntry, destDir)
     if not INaturalist.downloadOriginalPhoto(photoEntry.url, destPath) then
         return nil
     end
+
+    -- Runs before catalog:addPhoto, and outside withWriteAccessDo below --
+    -- this is a blocking external-process call on a file not yet in the
+    -- catalog, not a catalog mutation, and has no business holding a write
+    -- transaction open while it runs.
+    applyEmbeddedExif(destPath, observation)
 
     local newPhoto
     catalog:withWriteAccessDo("Import recovered iNat photo", function()

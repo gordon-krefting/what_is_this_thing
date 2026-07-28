@@ -2364,6 +2364,79 @@ and careful manual re-reading of the restructured control flow instead.
 again after this fix, it likely means a genuinely new, not-yet-hardened
 code path -- worth reporting rather than assuming it'll clear itself.
 
+## Recovered photos now get real embedded EXIF, not just `dateCreated` (2026-07-28)
+
+Follow-on from Recovery follow-up #3 above. `dateCreated` makes
+Lightroom's own metadata panel show a capture date, but it's an SDK-level
+field, not real EXIF -- the file itself still has no
+`DateTimeOriginal`/`DateTimeDigitized`, the same two fields explained to
+the user earlier this session (the third, `DateTime`/`ModifyDate`, means
+"last modified," not capture time, and is deliberately left alone).
+
+Since `dateTimeOriginal` is read-only via the SDK (confirmed earlier
+session), the only way to get a *real* one onto a recovered photo is to
+write it into the file on disk before `catalog:addPhoto` ever reads it.
+Added `applyEmbeddedExif(destPath, observation)` in `INatRecovery.lua`,
+called in `importOnePhoto` right after download and before the
+`catalog:withWriteAccessDo` transaction (it's a blocking external-process
+call on a file not yet in the catalog -- no business holding a catalog
+write transaction open for it). Reformats
+`observation.time_observed_at`'s local-clock digits into EXIF's own
+`YYYY:MM:DD HH:MM:SS` shape and writes both `DateTimeOriginal` and
+`CreateDate` (exiftool's alias for `DateTimeDigitized`) plus their
+`OffsetTimeOriginal`/`OffsetTimeDigitized` companions (EXIF 2.31, holds
+the embedded offset, e.g. `-04:00`) via `exiftool -overwrite_original`,
+shelled out through `LrTasks.execute`.
+
+Reused `UpdateLocationFromGpx.lua`/`geotag_from_gpx.py`'s own hard-won
+fix for a real gotcha discovered building that feature: GUI-launched
+apps like Lightroom don't inherit an interactive shell's PATH, so a bare
+`exiftool` lookup fails even when it's on the user's normal PATH. Same
+explicit-candidate-path fallback (`/opt/homebrew/bin/exiftool`,
+`/usr/local/bin/exiftool`), just reimplemented directly in Lua this time
+(`findExiftool()`) rather than delegating to a Python helper -- this
+write is a single fixed-shape exiftool call with no parsing/glob/regex
+work to justify Python's convenience the way the GPX script's more
+involved logic did. Uses `-overwrite_original` (unlike the GPX pass,
+which deliberately keeps an `_original` backup of irreplaceable camera
+files) since these are disposable placeholder copies to begin with -- a
+backup file here would just be clutter.
+
+`applyCaptureDate` (the existing `dateCreated` write) is kept as-is, now
+explicitly a belt-and-suspenders fallback: still fires even on a machine
+without exiftool, or if the exiftool write silently no-ops for any
+reason.
+
+**Not yet confirmed live** -- same caveat as `catalog:addPhoto` and the
+original `applyCaptureDate` addition. First real verification: run
+recovery on a machine with exiftool actually installed at one of the two
+checked paths, then check both `exiftool` on the resulting file directly
+and Lightroom's own metadata panel (`Date Time Original`/`Date Time
+Digitized` should now show real values, not just blank/derived-from-
+dateCreated).
+
+Regression tests added to `mock_test_inatrecovery.lua` (Cases 5b/5c):
+mocks `LrFileUtils.exists` to control whether the fake exiftool path is
+"found," and `LrTasks.execute` to capture the invoked command string.
+Case 5b asserts the full command shape when exiftool is found (both
+date fields, both offset fields, `-overwrite_original`, and explicitly
+*not* touching `-ModifyDate`); Case 5c asserts recovery still succeeds
+via the `dateCreated` fallback (no crash, no exiftool call at all) when
+exiftool isn't found at either candidate path.
+
+Confirmed live same day: a real recovery run produced a file with
+correct `DateTimeOriginal`/`CreateDate`/`Offset*` values (checked
+directly with `exiftool`).
+
+**One-off backfill, same day**: the 163 photos already recovered before
+this fix existed had no real EXIF timestamp at all. Rather than adding
+plugin code for a single retroactive pass, queried the catalog directly
+(`iNatRecoveredPlaceholder = 'yes'`) for their file paths + linked
+`iNatObservationId`s, batch-fetched `time_observed_at` for the 148
+unique observations from the iNat API, and ran the exact same exiftool
+write (scripted in Python, scratch/throwaway, not added to the plugin)
+against each file directly. All 163 updated, 0 skipped, 0 failed.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
