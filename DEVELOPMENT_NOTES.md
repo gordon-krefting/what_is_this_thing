@@ -2164,6 +2164,104 @@ worth remembering:
 - IPTC has one Caption/Description field, exposed as `caption` -- there's
   no separate "description" field to add.
 
+## "Move Flora & Fauna Pics": built, then abandoned as fundamentally unworkable (2026-07-26)
+
+Goal: speed up graduating photos out of `~/Photos/import` into their
+permanent, dated home across `~/Photos/local` and
+`/Volumes/Photo Archive/archive` (both separately backed up by
+`~/bin/manage_photo_backups.rb`). Originally scoped as a fully automatic
+move; research confirmed the Lightroom Classic plugin SDK has no way to
+move an already-cataloged photo's file while preserving its catalog
+record at all (no `photo:move()`, no writable `path`, no
+`photo:delete()` -- confirmed against Adobe's own feature-request
+thread, where a well-known plugin author notes this has been requested
+for years and never addressed). Scoped down instead to a safer hybrid:
+compute the correct destination folder from capture date + a flora/
+fauna/local/archive choice, create it on disk, and best-effort switch
+Lightroom's Library view to it -- leaving the actual move as a manual
+drag in Lightroom's own Folders panel, which preserves everything
+perfectly but isn't plugin-accessible.
+
+Built (`MoveFloraFaunaPics.lua`), then hit a sequence of live bugs while
+testing, each fixed in turn: `dateCreated` turned out to be a write-only
+raw-metadata key (`getRawMetadata` needed `dateTimeOriginal` instead);
+`photo:getRawMetadata` and `catalog:getFolderByPath` both need
+`LrTasks.pcall`, not plain `pcall`, to cross Lightroom's yield boundary
+(the same bug class this project has hit and documented several times
+before -- worth remembering yet again: **default to `LrTasks.pcall` for
+any Lightroom SDK call wrapped in error-handling, not plain `pcall`,
+unless there's a specific reason the call can't yield**).
+
+**Then hit the wall that killed the feature**: even after all of the
+above was fixed, the created folder never appeared in Lightroom's
+Folders panel at all -- confirmed live, not a theory. Neither
+"Synchronize Folder..." nor restarting Lightroom made it appear. Pulled
+the complete `LrCatalog` method list from the SDK reference (every
+method on the class, not a summary) and confirmed there is no
+`createFolder` or any folder-creation capability whatsoever -- only
+read-only lookups (`getFolderByPath`, `getFolders`). The actual
+conclusion: **Lightroom's Folders panel appears to only show folders
+that already contain at least one cataloged photo** -- a folder created
+purely on disk, by any means, stays invisible no matter how it's
+rescanned. The only thing that reliably creates a folder Lightroom
+immediately shows is Lightroom's own native "Create Folder Inside..."
+action, which isn't exposed to plugins either. This is a genuine
+chicken-and-egg problem with no SDK-level way out: a plugin can't make
+an empty destination folder visible for a drag-and-drop that needs it to
+already be visible.
+
+Presented this to the user as a real fork -- reduce the feature to "we
+tell you the exact folder name to manually create via Lightroom's own
+'Create Folder Inside...'" (real automation value shrinks to just
+avoiding the mental math/typos), or drop it. **Decision: dropped
+entirely.** `MoveFloraFaunaPics.lua` deleted, its `Info.lua` menu entry
+removed, its scratch test discarded. Kept as one consolidated writeup
+(collapsing what were four separate dated entries during active
+development) specifically so the core finding survives for next time:
+**don't build anything in this plugin that depends on a plugin-created,
+not-yet-photo-containing folder becoming visible/selectable in
+Lightroom's UI -- it won't, and there's no known workaround.**
+
+## "Merge Observation" no longer depends on click order (2026-07-27)
+
+`MergeObservation.lua` used to pick its "master" identification via
+Lightroom's own `catalog:getTargetPhoto()` ("most selected" photo --
+confirmed live 2026-07-23 to be whichever photo you click FIRST, not
+last). Fragile in practice: easy to click the wrong photo first, and if
+more than one selected photo was already identified, whichever got
+clicked first silently won with no chance to notice a mistake.
+
+Redesigned to group selected photos by their existing local Observation
+ID (not scientificName alone -- two genuinely separate already-linked
+observations could coincidentally share a species name; grouping by
+Observation ID keeps them correctly distinct, the same split-detection
+concept `SetCultivar.lua`'s `expandToObservationGroup` already uses).
+Zero distinct groups: clear error, same as before conceptually. Exactly
+one: merges immediately, no dialog -- this is now the common case (one
+already-identified photo plus untagged siblings) and needed zero
+friction. More than one: a radio-button dialog (same pattern as
+`CandidatePicker.lua`/`INatSyncRunner.lua`) lists each distinct
+identification with its photo count and asks explicitly which one
+should win, rather than leaving it to click order.
+
+Scope stayed contained to this one file: the shared `ObservationMerge.merge(master,
+others)` function didn't need to change at all (it already just takes
+an explicit master), and the other caller (`MergeCandidatesDialog.lua`,
+used by the sync mismatch-resolution flow) already passes an explicit
+master from its own context and never relied on click order either.
+Also fixed a stale comment referencing a "SuggestMergeCandidates.lua"
+that doesn't exist (renamed to `MergeCandidatesDialog.lua` at some
+point without updating the comment).
+
+Regression tests: `mock_test_mergeobservation.lua` rewritten for the new
+behavior -- single-identification auto-merge with no dialog, zero-
+identification error, multiple-identification dialog with an honored
+explicit choice (including correcting the NON-chosen already-identified
+photo to match, not just the untagged ones), same-species-different-
+Observation-ID still treated as distinct candidates (confirms the
+grouping key is Observation ID, not scientificName), and a canceled
+dialog writing nothing.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
