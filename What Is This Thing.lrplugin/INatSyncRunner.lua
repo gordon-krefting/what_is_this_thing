@@ -53,6 +53,30 @@ local function toUtcW3CDate(time)
     return raw .. "Z"
 end
 
+-- "2 hours ago" / "3 days ago" style relative-time label for the
+-- pre-flight dialog's status section -- deliberately pure arithmetic on
+-- the two Cocoa-epoch numbers (LrDate.currentTime() minus the stored
+-- cursor), not string parsing/reformatting of a rendered date -- this
+-- project has been burned by date-string handling more than once (see
+-- toUtcW3CDate above), so this sidesteps that whole class of risk
+-- entirely for what's just a rough, human-friendly duration.
+local function describeElapsedTime(seconds)
+    if seconds < 0 then
+        return "just now"
+    elseif seconds < 60 then
+        return "less than a minute ago"
+    elseif seconds < 3600 then
+        local m = math.floor(seconds / 60)
+        return m .. " minute" .. (m == 1 and "" or "s") .. " ago"
+    elseif seconds < 86400 then
+        local h = math.floor(seconds / 3600)
+        return h .. " hour" .. (h == 1 and "" or "s") .. " ago"
+    else
+        local d = math.floor(seconds / 86400)
+        return d .. " day" .. (d == 1 and "" or "s") .. " ago"
+    end
+end
+
 -- Single entry point for "Sync from iNaturalist" -- consolidates what were
 -- previously three separate commands (Sync, Full Sync, Recover Missing
 -- Photos) into one, per the 2026-07-29 consolidation plan
@@ -566,9 +590,8 @@ end
 -- through mismatches without re-running the sync or hunting through
 -- Lightroom for each one. Uses the raw dateTimeOriginal (Cocoa epoch)
 -- formatted via LrDate.timeToW3CDate -- already used elsewhere in this
--- file/ShowINatSyncState.lua, rather than guessing at a getFormattedMetadata
--- key for a human-readable date (unverified whether one even exists for
--- this field).
+-- file, rather than guessing at a getFormattedMetadata key for a
+-- human-readable date (unverified whether one even exists for this field).
 local function collectPhotoDetails(photos)
     local details = {}
     for _, photo in ipairs(photos) do
@@ -866,9 +889,46 @@ function INatSyncRunner.run(options)
                 props.fullSync = false
 
                 local f = LrView.osFactory()
+
+                -- Folds in what used to be the separate "Show iNat Sync
+                -- State" one-off diagnostic -- last-sync cursor, pending
+                -- retry/mismatch counts, stored username -- as a proper
+                -- status section on the one dialog every sync already
+                -- shows, rather than a separate menu command nobody
+                -- reaches for day to day.
+                local lastSyncTime = INatSync.getLastSyncTime()
+                local lastSyncLine
+                if lastSyncTime then
+                    lastSyncLine = "Last synced " .. describeElapsedTime(LrDate.currentTime() - lastSyncTime)
+                else
+                    lastSyncLine = "Never synced before"
+                end
+
+                local pendingCount = #INatSync.getPendingRetryIds() + #INatSync.getPendingMismatchIds()
+                local pendingLine
+                if pendingCount > 0 then
+                    pendingLine = pendingCount .. " observation" .. (pendingCount == 1 and "" or "s")
+                        .. " still pending from a previous run"
+                else
+                    pendingLine = "Nothing pending"
+                end
+
+                local statusBox = f:group_box {
+                    title = "Sync Status",
+                    fill_horizontal = 1,
+                    f:column {
+                        spacing = f:control_spacing() / 2,
+                        f:static_text { title = lastSyncLine },
+                        f:static_text { title = pendingLine },
+                        f:static_text { title = "iNat account: " .. tostring(INatSync.getUsername() or "(not set)") },
+                    },
+                }
+
                 local contents = f:column {
                     bind_to_object = props,
                     spacing = f:control_spacing(),
+                    statusBox,
+                    f:spacer { height = 8 },
                     f:radio_button {
                         title = "Incremental -- only what's changed since the last sync",
                         value = LrView.bind("fullSync"),

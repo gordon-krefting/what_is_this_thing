@@ -49,10 +49,6 @@ return {
             file = "SyncFromINaturalist.lua",
         },
         {
-            title = "Show iNat Sync State (one-off)",
-            file = "ShowINatSyncState.lua",
-        },
-        {
             title = "Show Observation Filenames (one-off)",
             file = "ShowObservationFilenames.lua",
         },

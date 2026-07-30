@@ -2775,6 +2775,43 @@ the session) -- worked around by bundling the new fixtures into one table
 (`plover.photoOriginalOrder`, etc.) instead of several top-level locals,
 rather than touching unrelated existing code to make room.
 
+## Folded "Show iNat Sync State" into the pre-flight dialog's own status section (2026-07-30)
+
+The standalone one-off command showed the raw stored cursor
+(`lastINatSyncAt`, both as a bare number and via `LrDate.timeToW3CDate`),
+the pending-retry count, and the stored username -- useful, but a
+separate menu entry nobody reaches for during a normal sync, and already
+slightly stale (never updated to also show the pending-mismatch count,
+which didn't exist yet when it was written). Removed
+`ShowINatSyncState.lua` and its `Info.lua` entry entirely; the same
+information now shows as a "Sync Status" group box at the top of the
+sync's own pre-flight (Full/Incremental) dialog -- every run already
+opens this dialog, so the status is visible without any extra step.
+
+Added `describeElapsedTime(seconds)` in `INatSyncRunner.lua` for a
+human-friendly "2 hours ago"/"3 days ago" label -- deliberately pure
+arithmetic on the two Cocoa-epoch numbers (`LrDate.currentTime()` minus
+the stored cursor), not string parsing/reformatting of a rendered date,
+sidestepping the whole class of date-string bugs this project has hit
+more than once. Pending count is now the COMBINED retry + mismatch total
+(the old tool only ever showed retry), matching everything else's move
+toward one unified view of "what's still pending" rather than
+per-mechanism counts.
+
+Used `f:group_box` (titled "Sync Status") for visual structure -- genuinely
+new-to-this-project SDK surface, confirmed real via the SDK reference
+before use (along with `f:separator`, not used here but confirmed
+available if needed later) rather than assumed.
+
+Testing: extended `mock_test_inatsyncrunner.lua`'s LrView stub with
+`group_box`/`spacer`, and added a `collectTitles` helper that walks the
+whole fake view tree collecting every `.title` string -- robust to the
+exact nested structure changing later, unlike asserting on hardcoded
+array positions. Cases 1b/1c confirm the status section correctly shows
+"never synced"/"nothing pending" with fresh state, and a real elapsed
+time + combined pending count ("3 hours ago", "3 observations still
+pending" from 1 retry + 2 mismatch entries) with populated state.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
