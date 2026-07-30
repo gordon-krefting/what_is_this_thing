@@ -462,6 +462,60 @@ local function showNoGoodCandidateNotice(observation, reason)
     end)
 end
 
+-- Purely informational -- shown after an ALREADY-linked observation's
+-- data (species/common/rank, quality grade, or the unresponded-suggestion
+-- flag -- see INatSync.applyMatch's `changes`) actually changed on iNat's
+-- side and was just applied. Never gates the write (per the user: if
+-- matching is already correct, there's no legitimate reason to decline a
+-- routine field update) -- just an "OK" to acknowledge, plus a "Skip All
+-- Remaining" to mute further such notices for the rest of this run
+-- (changes keep applying silently either way -- this only controls
+-- whether a dialog interrupts to show them, same "could be dozens in one
+-- Full Sync" concern the merge-candidates picker's own skip-all exists
+-- for). A first-time link never reaches here -- its own dedicated review
+-- (confirmNewLink) already covers that moment.
+--
+-- Returns "ok" or "skipAll".
+local function showFieldChangeNotice(observation, changes, allowSkipAll)
+    local outcome = "ok"
+
+    LrFunctionContext.callWithContext("INatFieldChangeNotice", function(context)
+        local f = LrView.osFactory()
+        local inatThumbnails, inatThumbnailPaths = buildAllINatThumbnails(f, observation)
+
+        local changeLines = {}
+        for _, c in ipairs(changes) do
+            table.insert(changeLines, f:static_text { title = "- " .. c })
+        end
+
+        local contents = f:column {
+            spacing = f:control_spacing(),
+            f:static_text { title = "iNaturalist data changed for " .. describeObservation(observation) .. ":" },
+            f:row { inatThumbnails, viewOnINatButton(f, observation.id) },
+            f:column(changeLines),
+        }
+
+        local dialogArgs = {
+            title = "iNaturalist Data Changed",
+            contents = contents,
+            actionVerb = "OK",
+        }
+        if allowSkipAll then
+            dialogArgs.otherVerb = "Skip All Remaining"
+        end
+
+        local result = LrDialogs.presentModalDialog(dialogArgs)
+
+        cleanupINatThumbnails(inatThumbnailPaths)
+
+        if result == "other" then
+            outcome = "skipAll"
+        end
+    end)
+
+    return outcome
+end
+
 -- Short, generic mismatch description (no filenames) -- used both for the
 -- dialog's capped preview and as the header line in the fuller log file
 -- below.
@@ -729,6 +783,10 @@ local function formatSummary(counts, needsAttentionCount, reportPath, fullLogPat
         table.insert(parts, counts.noGoodCandidate .. " observation" .. (counts.noGoodCandidate == 1 and "" or "s")
             .. " had no good local candidate (see the Needs Attention report)")
     end
+    if counts.fieldChangeNotices > 0 then
+        table.insert(parts, counts.fieldChangeNotices .. " already-linked observation" .. (counts.fieldChangeNotices == 1 and "" or "s")
+            .. " had iNaturalist data change (quality grade, suggestion, or identification)")
+    end
 
     local message = #parts > 0 and table.concat(parts, "\n") or "Nothing to sync -- everything's already up to date."
 
@@ -914,6 +972,7 @@ function INatSyncRunner.run(options)
                 applied = 0, linkedOnly = 0, repairedAncestry = 0, skippedDisagreement = 0, failed = 0,
                 unresolvedCollisions = 0, absorbedSiblings = 0, resolvedViaMergeDialog = 0, skippedNewLinkConfirmation = 0,
                 recoveredTotalLoss = 0, recoveredPartialLoss = 0, declinedDownload = 0, downloadFailed = 0, noGoodCandidate = 0,
+                fieldChangeNotices = 0,
             }
 
             -- Bucket 3/4: every observation with NO existing local match at
@@ -1073,6 +1132,14 @@ function INatSyncRunner.run(options)
             -- report afterward.
             local skipAllRemainingMismatchDialogs = false
 
+            -- Same "could be dozens in one Full Sync" concern as
+            -- skipAllRemainingMismatchDialogs above, for
+            -- showFieldChangeNotice's own "Skip All Remaining" button --
+            -- separate flag since the two dialogs are independent (a
+            -- change notice never gates anything, so muting it has no
+            -- bearing on whether mismatch dialogs should also be muted).
+            local skipAllRemainingFieldChangeNotices = false
+
             for i, match in ipairs(allMatches) do
                 if progressScope:isCanceled() then
                     canceledDuringApply = true
@@ -1115,6 +1182,23 @@ function INatSyncRunner.run(options)
                         INatSync.markRetryOutcome(match.observation.id, true)
                         counts[result.status] = (counts[result.status] or 0) + 1
                         counts.absorbedSiblings = counts.absorbedSiblings + (result.absorbedCount or 0)
+
+                        -- Purely informational -- see showFieldChangeNotice's
+                        -- own comment. result.changes is always empty for a
+                        -- first-time link (match.group.iNatObservationId was
+                        -- nil going into applyMatch), so this can't double up
+                        -- with confirmNewLink's own review of the same event.
+                        if result.changes and #result.changes > 0 and not skipAllRemainingFieldChangeNotices then
+                            progressScope:setCaption(
+                                "Reviewing data change: " .. tostring(match.observation.taxon and match.observation.taxon.name or match.observation.id)
+                            )
+                            counts.fieldChangeNotices = counts.fieldChangeNotices + 1
+                            local noticeOutcome = showFieldChangeNotice(match.observation, result.changes, true)
+                            if noticeOutcome == "skipAll" then
+                                skipAllRemainingFieldChangeNotices = true
+                            end
+                        end
+
                         if result.mismatch then
                             -- Only worth offering the interactive picker when
                             -- iNat has photos we don't -- local-has-more is

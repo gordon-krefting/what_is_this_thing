@@ -768,6 +768,24 @@ local function candidateDiffersFromLocal(observation, group)
     return observedRank ~= localRank
 end
 
+-- Human-readable label for iNat's quality_grade values, matching iNat's
+-- own UI terminology -- confirmed live 2026-07-30: showing the raw API
+-- value ("needs_id") in the field-change notice (INatSyncRunner.lua) read
+-- oddly next to the expected "Research Grade"-style wording. Falls back
+-- to the raw value for anything unrecognized (iNat has only ever exposed
+-- these three), rather than guessing at a new label.
+local QUALITY_GRADE_LABELS = {
+    casual = "Casual",
+    needs_id = "Needs ID",
+    research = "Research Grade",
+}
+local function describeQualityGrade(grade)
+    if not grade then
+        return "(none)"
+    end
+    return QUALITY_GRADE_LABELS[grade] or grade
+end
+
 -- Detects a "someone suggested a different ID and I haven't responded"
 -- state -- distinct from INaturalist.observationAgreesWithMe, which only
 -- asks whether the OWNER's own current identification (if any) agrees
@@ -874,7 +892,13 @@ end
 -- true/false (whether a mismatch check was actually attempted this call --
 -- callers should only update the pending-mismatch list off this, not off
 -- `mismatch == nil` alone, since that's also true when no check ran at
--- all) }.
+-- all), changes = a list of human-readable "Field: old -> new" strings,
+-- purely informational (never gates the write above -- if matching is
+-- already correct there's no legitimate reason to decline a routine field
+-- update, so callers should just show these as an FYI, not a
+-- confirmation), always empty for a first-time link (group.iNatObservationId
+-- was nil going in -- that already gets its own dedicated review
+-- elsewhere, showing this too would be redundant) }.
 function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByFilename, forceRecheck, untaggedSingletonsSortedByTime)
     local catalog = LrApplication.activeCatalog()
     local photos = group.photos
@@ -998,6 +1022,43 @@ function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByF
 
     local suggestedId = describeUnrespondedSuggestion(observation, username)
 
+    -- Purely informational diff of what's about to change on an
+    -- ALREADY-linked observation -- never gates the write below (per the
+    -- user: if matching is already correct, there's no legitimate reason
+    -- to decline a routine field update, so this is an FYI notice, not a
+    -- confirmation). Read BEFORE the write below overwrites them. Only
+    -- populated for already-linked groups -- a first-time link already
+    -- gets its own dedicated review (confirmNewLink, INatSyncRunner.lua),
+    -- so showing this too on the very same run would be redundant.
+    local changes = {}
+    if wasAlreadyLinked then
+        if needsSpeciesUpdate then
+            if observation.taxon.name ~= group.scientificName then
+                table.insert(changes, string.format("Species: %s -> %s", group.scientificName or "(none)", observation.taxon.name))
+            end
+            if observation.taxon.preferred_common_name ~= group.commonName then
+                table.insert(changes, string.format(
+                    "Common name: %s -> %s", group.commonName or "(none)", observation.taxon.preferred_common_name or "(none)"
+                ))
+            end
+            local observedRank = observation.taxon.rank or "species"
+            local localRank = group.rank or "species"
+            if observedRank ~= localRank then
+                table.insert(changes, string.format("Rank: %s -> %s", localRank, observedRank))
+            end
+        end
+        local oldQualityGrade = photos[1]:getPropertyForPlugin(_PLUGIN, "iNatQualityGrade")
+        if oldQualityGrade ~= observation.quality_grade then
+            table.insert(changes, string.format(
+                "Quality grade: %s -> %s", describeQualityGrade(oldQualityGrade), describeQualityGrade(observation.quality_grade)
+            ))
+        end
+        local oldSuggestedId = photos[1]:getPropertyForPlugin(_PLUGIN, "iNatSuggestedId")
+        if oldSuggestedId ~= suggestedId then
+            table.insert(changes, string.format("Suggested ID: %s -> %s", oldSuggestedId or "(none)", suggestedId or "(none)"))
+        end
+    end
+
     catalog:withWriteAccessDo("Link iNaturalist observation", function()
         for _, photo in ipairs(photos) do
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", tostring(observation.id))
@@ -1073,7 +1134,7 @@ function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByF
         mismatch = { countMismatch = countMismatch }
     end
 
-    return { status = status, mismatch = mismatch, absorbedCount = absorbedCount, checkedMismatch = shouldCheckMismatch }
+    return { status = status, mismatch = mismatch, absorbedCount = absorbedCount, checkedMismatch = shouldCheckMismatch, changes = changes }
 end
 
 -- The observation ids that failed to apply on a previous run, to retry

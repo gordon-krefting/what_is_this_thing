@@ -1022,6 +1022,17 @@ function INaturalist.getObservationPhotoCount(observationId)
     return #(observation.photos or {})
 end
 
+-- Substitutes the size segment of an iNat photo URL (e.g.
+-- ".../photos/704633426/square.jpg") for a different one -- iNat's
+-- storage uses a plain, consistent size-word-in-the-path convention
+-- (square/small/medium/large/original). Falls back to returning `url`
+-- unchanged if it doesn't match the expected shape, rather than raising
+-- -- callers already treat a failed/short download as "couldn't recover
+-- this one," not a hard error.
+local function toSizeUrl(url, size)
+    return (url:gsub("/[%w_]+%.(%a+)$", "/" .. size .. ".%1"))
+end
+
 -- Downloads ONE photo entry (using its `url` field the standard v1 pull
 -- already includes -- see getMyObservations, no extra API call needed) to
 -- a local temp file, so the sync dialogs can show an actual iNat
@@ -1035,12 +1046,19 @@ end
 -- just needs to be unique per call (observation id, or observation id +
 -- photo index) so concurrent/sequential downloads don't collide on the
 -- same temp path.
+--
+-- Uses the "small" size (240x240), not the default `url` field's "square"
+-- (75x75) -- confirmed live 2026-07-30 against a real photo: "square" was
+-- visibly blurry once upscaled to the dialogs' 150x150 display size,
+-- while "small" (only ~5x the file size, ~51KB vs ~10KB in the real test)
+-- comfortably covers it with no upscaling at all.
 local function downloadPhotoThumbnail(photo, tempFileSuffix)
     if not photo or not photo.url or photo.url == "" then
         return nil
     end
 
-    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, photo.url)
+    local url = toSizeUrl(photo.url, "small")
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
     if not ok or not hdrs or hdrs.status ~= 200 or not response or response == "" then
         return nil
     end
@@ -1082,38 +1100,24 @@ function INaturalist.downloadAllObservationThumbnails(observation)
     return paths
 end
 
--- Substitutes the size segment of an iNat photo URL (e.g.
--- ".../photos/704633426/square.jpg") for "original" -- confirmed live
--- during planning: the standard `photo.url` field is always the small
--- "square" thumbnail, but iNat's storage uses a plain, consistent
--- size-word-in-the-path convention, and downloading the substituted
--- "original.jpg" URL for a real photo returned a file whose actual pixel
--- dimensions matched the API's own reported `original_dimensions` (2048px
--- capped on the long edge, regardless of the true uploaded resolution --
--- iNat never retains the true original). Falls back to returning `url`
--- unchanged if it doesn't match the expected shape, rather than raising --
--- callers already treat a failed/short download as "couldn't recover this
--- one," not a hard error.
-local function toOriginalSizeUrl(url)
-    local substituted = url:gsub("/[%w_]+%.(%a+)$", "/original.%1")
-    return substituted
-end
-
 -- Downloads the ORIGINAL (largest available, still capped by iNat at
--- 2048px long edge -- see toOriginalSizeUrl above) copy of a single iNat
--- photo to a GIVEN destination path -- unlike downloadObservationThumbnail
--- above, which always uses a small default size and a temp path for a
--- one-shot dialog preview, this is for the "Recover Missing Photos"
--- feature, where the downloaded file needs to persist at a real,
--- catalog-addable location. Returns true on success, false on any failure
--- (network, non-200 status, empty body, write failure) -- callers should
--- treat false as "couldn't recover this one," not abort the whole run.
+-- 2048px long edge -- confirmed live: downloading the substituted
+-- "original.jpg" URL for a real photo returned a file whose actual pixel
+-- dimensions matched the API's own reported `original_dimensions`, iNat
+-- never retains the true original) copy of a single iNat photo to a GIVEN
+-- destination path -- unlike downloadObservationThumbnail above, which
+-- always uses a small default size and a temp path for a one-shot dialog
+-- preview, this is for the "Recover Missing Photos" feature, where the
+-- downloaded file needs to persist at a real, catalog-addable location.
+-- Returns true on success, false on any failure (network, non-200 status,
+-- empty body, write failure) -- callers should treat false as "couldn't
+-- recover this one," not abort the whole run.
 function INaturalist.downloadOriginalPhoto(photoUrl, destPath)
     if not photoUrl or photoUrl == "" then
         return false
     end
 
-    local url = toOriginalSizeUrl(photoUrl)
+    local url = toSizeUrl(photoUrl, "original")
     local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
     if not ok or not hdrs or hdrs.status ~= 200 or not response or response == "" then
         return false

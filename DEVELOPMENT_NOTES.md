@@ -2627,6 +2627,76 @@ with the rest of the file. Added `mock_test_inatsyncrunner.lua` Case 4b,
 seeding a fake prior retry-list entry before a successful recovery and
 confirming it's cleared afterward.
 
+## iNat thumbnail quality fix, and a new "iNaturalist Data Changed" notice for already-linked observations (2026-07-30)
+
+**Thumbnail quality**: confirmed live against a real photo that the
+default `photo.url` field (used for every dialog thumbnail) is iNat's
+smallest "square" size (75x75px), badly upscaled to fill the dialogs'
+150x150 display box. iNat's "small" size (240x240px) is only ~5x the file
+size (51KB vs 10KB in the real test) and comfortably covers the display
+size with no upscaling. Generalized the existing `toOriginalSizeUrl`
+helper into `toSizeUrl(url, size)` (same substitution mechanism, now
+parameterized) and switched `downloadPhotoThumbnail` to request "small"
+instead of the raw default.
+
+**"iNaturalist Data Changed" notice**: the user recalled intending (but,
+per a confirmed pattern of lost input this session, apparently never
+actually managing to say) that a sync should show a dialog for ANY
+already-linked observation's data changing, not just for connecting new
+observations. Built as a *purely informational* notice, deliberately with
+no decline option -- per the user: "If the observations are correctly
+matched... there would be no reason to decline." This is a real
+simplification over a first draft of the design that would have gated the
+write behind confirmation: since matching is already established by the
+time this fires, the change just gets applied and the dialog is a
+same-run FYI, not a gate.
+
+- **`INatSync.lua`**: `applyMatch` now returns a `changes` list (e.g.
+  `"Quality grade: needs_id -> research"`) -- a plain diff of
+  scientificName/commonName/rank, `iNatQualityGrade`, and
+  `iNatSuggestedId` against what's currently stored, computed BEFORE the
+  write so old values are still readable. Always empty for a first-time
+  link (`wasAlreadyLinked` false) -- that moment already gets its own
+  dedicated review via `confirmNewLink`, so showing this too would be
+  redundant.
+- **`INatSyncRunner.lua`**: new `showFieldChangeNotice` (thumbnails +
+  change list + "OK", reusing `buildAllINatThumbnails`), shown right
+  after a successful apply whenever `result.changes` is non-empty. Added
+  a "Skip All Remaining" escape hatch (own flag,
+  `skipAllRemainingFieldChangeNotices`, independent of the mismatch
+  picker's own skip-all) specifically because quality-grade transitions
+  ("needs_id" -> "research") happen routinely as community IDs
+  accumulate -- a Full Sync could plausibly surface this for dozens of
+  already-linked observations at once, and unlike `confirmNewLink`
+  (deliberately no bulk-accept, since first-time links are rarer and
+  higher-stakes), this is routine churn with no decision being made at
+  all. Skip-all only mutes the DIALOG -- changes keep applying silently
+  either way, confirmed by a dedicated test.
+- No retry-list or Needs Attention report involvement at all -- there's
+  no "declined" state for this notice to produce.
+
+**Testing**: `mock_test_inatsync.lua` gained two cases (7e-diag,
+7e-diag2) confirming `changes` is empty for a first-time link even when
+fields are being written for the first time, and correctly names each
+field that's actually different for an already-linked group.
+`mock_test_inatsyncrunner.lua` gained Cases 11-12 (notice fires when
+quality grade actually changes and the change still applies; Skip All
+Remaining mutes further notices but not the underlying writes) --
+building these exposed that the existing Case 10 ("nothing pending")
+fixture had incomplete commonName/rank fields that happened to never
+matter before this feature existed, and that `dialogCallLog` wasn't being
+reset before Case 10's block, letting an unrelated dialog title leak in
+from Cases 8/9's similarly-incomplete fixtures -- both fixed as part of
+adding this coverage, not just worked around.
+
+**Live-testing follow-up, same day**: the notice showed the raw API
+value ("needs_id") instead of iNat's own UI wording ("Research Grade").
+Added `QUALITY_GRADE_LABELS`/`describeQualityGrade` in `INatSync.lua`
+(casual/needs_id/research -> Casual/Needs ID/Research Grade, falling back
+to the raw value for anything unrecognized) and updated the quality-grade
+line in `changes` to use it. Updated the existing `mock_test_inatsync.lua`
+assertion to expect the display label, not the raw value.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
