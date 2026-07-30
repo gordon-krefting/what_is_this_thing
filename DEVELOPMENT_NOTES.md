@@ -2437,6 +2437,196 @@ unique observations from the iNat API, and ran the exact same exiftool
 write (scripted in Python, scratch/throwaway, not added to the plugin)
 against each file directly. All 163 updated, 0 skipped, 0 failed.
 
+## Consolidated Sync + Recover Missing Photos into one command, and added a "Needs Attention" report (2026-07-29)
+
+First of five improvement areas scoped this session (the other four:
+graceful degradation when the external archive drive isn't mounted,
+consolidating the Identify processes, this same logging/reporting work
+already folded in below, and trimming the one-off diagnostics). Reached
+through an extensive design conversation, not assumed up front -- see the
+plan file this session used
+(`~/.claude/plans/drifting-wobbling-sutton.md` at the time) for the full
+back-and-forth if it's still around.
+
+**What changed, user-facing**: "Sync from iNaturalist," "Full Sync from
+iNaturalist," and "Recover Missing Photos from iNaturalist" (3 menu
+entries) are now just "Sync from iNaturalist" (1 entry). Running it opens
+a small pre-flight dialog asking Full vs. Incremental (replacing "which
+menu item did you click" as how that choice got made). Recovering a
+photo with no local copy is no longer a separate later command -- it's
+offered inline, per observation, the moment sync notices it's missing,
+as a plain yes/no ("Download iNat's own copy(s)?"), same one-decision-
+at-a-time philosophy as the existing first-time-link confirmation (no
+bulk-accept). Declining does nothing further -- no nagging -- but the
+observation is retry-listed so it comes back up next run rather than
+silently vanishing behind the incremental cursor.
+
+**Design, verified against the real code rather than assumed**:
+
+- Sync vs. Full Sync turned out to differ by exactly one boolean
+  (`forceFullPull`) -- trivial to collapse into a dialog choice on one
+  entry point.
+- Recovery was more independent than it should have been: it ran its own
+  separate full pull (`INatRecovery.findCandidates` called
+  `INatSync.pullAndMatch` directly, redundant with whatever Sync just
+  did), and its log-writer/crash-hardening were hand-duplicated from
+  `INatSyncRunner.lua` -- concretely proven costly already, since the
+  stuck-progress-bar crash-safety bug (2026-07-27, above) had to be
+  diagnosed and fixed twice, once per file.
+- `INatSync.lua`'s own mismatch check already has a deliberate asymmetry
+  from an earlier session: only "iNat has a photo missing locally" is
+  ever reported, never the reverse. That meant two seemingly separate
+  cases -- an already-linked group missing *some* iNat photos ("partial
+  loss") and a photo-count "mismatch" on a linked group -- are the same
+  underlying signal, just differing in remedy (merge in an
+  existing-but-unlinked local photo vs. download a placeholder because no
+  local original exists). Both are now handled by one code path: try the
+  existing nearby-candidate merge search first (`MergeCandidatesDialog`,
+  unchanged), and only if that finds nothing, fall through to the new
+  inline download offer.
+- The existing `describeClosestMiss`/`describeClaimedAway` diagnostics
+  (2026-07-27, above) turned out to already be exactly the signal needed
+  to distinguish "confidently nothing local exists" (safe to offer a
+  download) from "matching was uncertain" (a real local candidate might
+  exist, just mis-correlated -- e.g. the #385810257 timezone case) --
+  `INatSync.pullAndMatch`'s `noLocalMatchReasons[obs.id]` being present
+  vs. nil already encodes this correctly. No `INatSync.lua` changes were
+  needed at all for this part; the plan had assumed a new structured
+  field would be required, but re-reading the actual code during
+  implementation found the existing data already sufficient -- worth
+  remembering as a case where checking the real code first avoided
+  unnecessary rework.
+- For the uncertain case, added a new "couldn't find a good local
+  candidate" notice -- reuses the existing `buildINatThumbnail` helper,
+  shows the observation's iNat photo, and requires only a single "OK" to
+  dismiss (no decision to make -- there's nothing concrete to compare
+  against). Retry-listed and logged either way. Expected to be rare now
+  that legacy-observation matching is mostly caught up (per the user);
+  revisit per-item-vs-aggregate notice style if that turns out wrong.
+- `RebuildMismatchList.lua` (an explicitly one-time migration tool, see
+  its own comment) depended on a `forceRecheckAll` option that only it
+  ever passed -- removed along with the option itself once its only
+  caller was gone, rather than leaving dead code behind.
+
+**The "Needs Attention" report**: generalizes the old `writeMismatchLog`
+(HTML, overwritten each run, clickable "View on iNat" links -- previously
+scoped to just filename mismatches) into one report covering every
+deferred outcome from the consolidated run: unresolved ambiguous
+collisions, declined/failed downloads, the new no-good-candidate notices,
+and filename mismatches. Auto-opens in the browser
+(`LrHttp.openUrlInBrowser("file://" .. path)`) whenever it's non-empty
+after a run -- no separate click needed to notice something's pending.
+Thumbnails link directly to iNat's own hosted photo URL
+(`observation.photos[1].url`, confirmed already the "square" size with
+zero substitution needed) rather than being downloaded/embedded by the
+plugin -- loaded by the browser when the report is viewed. Confirmed the
+report reflects the FULL CURRENT retry-list state (not just this run's
+deltas) essentially for free: every id on the retry list is already
+force-included in every run's pull (`pullIds` in `INatSyncRunner.run`),
+so anything still pending from a prior run gets re-attempted this run too
+and, if still unresolved, lands back in the same report -- no separate
+"read persisted state" step was needed.
+
+The old plain-text `inat-sync-log.txt` (append-only, every observation
+every run, for historical debugging) is unchanged in role, just extended
+to cover the new outcome types (`recovered_total_loss`,
+`recovered_partial_loss`, `declined_download`, `download_failed`,
+`no_good_candidate`).
+
+**Testing**: `INatRecovery.lua`'s `recoverTotalLoss`/`recoverPartialLoss`
+didn't change at all (still covered by the existing
+`mock_test_inatrecovery.lua`, minus its old `findCandidates` test case,
+removed along with the function). `INatSyncRunner.lua`'s own
+orchestration got a substantial new mock test
+(`mock_test_inatsyncrunner.lua`, scratch, dispatches
+`LrDialogs.presentModalDialog` by dialog title since one run now shows
+several different dialogs in sequence) covering: the pre-flight dialog
+appearing/being skippable; a confident no-local-match download offer
+being accepted (imports) and declined (retry-listed, reported, nothing
+downloaded); an uncertain (`closestMiss`) case never offering a download
+and always showing the notice instead; the partial-loss inline download
+fallback when the merge-candidates search finds nothing nearby, both
+accepted and declined; and the report/browser-auto-open behavior firing
+exactly when something's pending, never otherwise. Full `lua5.4` syntax
+sweep across all remaining plugin files passes.
+
+**Live-testing follow-up, same day**: ran a real Full Sync. Found one
+genuine bug and several worthwhile UI refinements.
+
+- **Real bug: a closestMiss 64+ hours away was wrongly routed to the
+  "no good candidate" notice instead of confidently offering a
+  download.** Live case: observation #386159770, a genuinely new photo
+  with zero local copy, got flagged uncertain purely because a same-
+  species photo existed in the catalog from 64 hours earlier -- an
+  unrelated, coincidental sighting, not a clock-skew mis-correlation of
+  the SAME photo (every real timezone/clock-skew case actually
+  investigated this session was at most a few hours). The bucket 3/4
+  split had been gating on "does `noLocalMatchReasons[obs.id]` exist at
+  all," with no regard for HOW far away a `closestMiss` actually was.
+  Fixed by adding `CLOSEST_MISS_STILL_UNCERTAIN_SECONDS` (24h) in
+  `INatSync.lua` and a new `noLocalMatchUncertain` signal returned
+  alongside `noLocalMatchReasons` from `pullAndMatch` -- a `claimedAway`
+  reason is always uncertain (a real, in-tolerance candidate exists right
+  now, just claimed elsewhere this run), but a `closestMiss` reason is
+  only uncertain when its gap is within the new threshold; beyond that
+  it's treated as confidently empty, same as no closestMiss at all.
+  Deliberately kept `noLocalMatchReasons[obs.id]` a plain string (not
+  restructured into a table) specifically so the existing
+  `mock_test_inatsync.lua` assertions (`reason:find(...)`) didn't need
+  touching -- the new signal is a parallel table, not a reshaping of the
+  old one. Added `mock_test_inatsyncrunner.lua` Case 7 directly
+  reproducing this exact live scenario (a 65-hour closestMiss must
+  confidently offer the download, not show the notice) -- regression-
+  proofed, not just fixed and forgotten.
+- **All of an observation's iNat photos, not just the first, now show in
+  the "Recover Missing Photo" and "Confirm New iNaturalist Link"
+  dialogs** -- both previously showed only `photos[1]` via
+  `buildINatThumbnail`/`downloadObservationThumbnail`. Added
+  `INaturalist.downloadAllObservationThumbnails` (refactored the download
+  mechanics into a shared private `downloadPhotoThumbnail`, reused by both
+  the single- and all-photos paths) and `buildAllINatThumbnails` in
+  `INatSyncRunner.lua`. Cheap to do -- these are already-small "square"
+  thumbnails, not full downloads.
+- **"Confirm New iNat Link" renamed to "Confirm New iNaturalist Link,"
+  and reworded**: was "Link this photo to #386368622..." -- but the
+  action links a local OBSERVATION (a group of one or more photos) to an
+  iNat observation, not "a photo" to anything. Now: "Link your local
+  observation to iNat observation #386368622...".
+  - This ALSO happened to fix a real, separately-reported truncation
+    bug: the per-group caption under the local thumbnails was
+    `describeCandidateGroups`'s filename-list-plus-"(currently tagged:
+    X)" string, squeezed into `buildCandidateColumn`'s 22-char-wide
+    caption -- confirmed live cutting off mid-string ("DSC_0532.NEF
+    (currently tagged:" with nothing after it, and a 4-photo group's
+    filename list truncating before ever reaching the species name).
+    Replaced with a new, purpose-built, full-width
+    `describeLocalIdentification(group)` ("Locally identified as: X" or
+    "Not yet identified locally.") -- the actual filenames aren't the
+    useful part of this decision, whether/how the local observation is
+    already identified is. `describeCandidateGroups` itself is
+    unchanged and still used as-is by `resolveClusterManually`, where
+    seeing each candidate's specific filenames + existing tag side by
+    side genuinely is the useful comparison.
+
+**Second live-testing follow-up, same day**: user asked whether there was
+any downside to deleting a few just-recovered photos and re-running sync,
+to exercise the recovery path again. While checking, found (and fixed) a
+related small gap: a successful `recoverTotalLoss` never called
+`INatSync.markRetryOutcome(obs.id, true)` -- every OTHER successful-apply
+path in this file already clears a prior retry-list entry unconditionally
+on success (confirmed by re-reading: the normal apply loop's own
+`markRetryOutcome(..., true)` call fires right after `applyOk`, before its
+mismatch-handling branch even runs, so the existing partial-loss recovery
+path was already covered by that -- only the newer total-loss download
+path, entirely its own branch, had been missing the equivalent call).
+Harmless in practice (a stale retry-list entry just means one extra
+observation gets force-re-pulled on future runs, no correctness impact,
+since a recovered observation now has `iNatObservationId` set and hits the
+fast path immediately) but worth fixing rather than leaving inconsistent
+with the rest of the file. Added `mock_test_inatsyncrunner.lua` Case 4b,
+seeding a fake prior retry-list entry before a successful recovery and
+confirming it's cleared afterward.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

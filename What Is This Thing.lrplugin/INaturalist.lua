@@ -1022,22 +1022,20 @@ function INaturalist.getObservationPhotoCount(observationId)
     return #(observation.photos or {})
 end
 
--- Downloads the FIRST photo of an already-pulled observation (using the
--- `url` field the standard v1 pull already includes -- see
--- getMyObservations, no extra API call needed) to a local temp file, so
--- the sync dialogs can show an actual iNat thumbnail next to the local
--- candidate photo instead of just text. NOT cached/persisted across runs
--- -- a fresh one-shot fetch each time a dialog needs it, deleted by the
--- caller once the dialog closes. Returns the local file path, or nil if
--- the observation has no photos or the download failed for any reason
--- (network, non-200 status, write failure) -- callers should treat nil as
--- "couldn't show a preview this time," not an error worth interrupting
--- the sync over.
---
--- Confirmed live: the downloaded file renders correctly via LrView's
--- `picture` control (see buildINatThumbnail in INatSyncRunner.lua).
-function INaturalist.downloadObservationThumbnail(observation)
-    local photo = observation.photos and observation.photos[1]
+-- Downloads ONE photo entry (using its `url` field the standard v1 pull
+-- already includes -- see getMyObservations, no extra API call needed) to
+-- a local temp file, so the sync dialogs can show an actual iNat
+-- thumbnail next to a local candidate photo instead of just text. NOT
+-- cached/persisted across runs -- a fresh one-shot fetch each time a
+-- dialog needs it, deleted by the caller once the dialog closes. Returns
+-- the local file path, or nil if the photo has no usable URL or the
+-- download failed for any reason (network, non-200 status, write
+-- failure) -- callers should treat nil as "couldn't show a preview this
+-- time," not an error worth interrupting the sync over. `tempFileSuffix`
+-- just needs to be unique per call (observation id, or observation id +
+-- photo index) so concurrent/sequential downloads don't collide on the
+-- same temp path.
+local function downloadPhotoThumbnail(photo, tempFileSuffix)
     if not photo or not photo.url or photo.url == "" then
         return nil
     end
@@ -1048,7 +1046,7 @@ function INaturalist.downloadObservationThumbnail(observation)
     end
 
     local tempDir = LrPathUtils.getStandardFilePath("temp")
-    local tempPath = LrPathUtils.child(tempDir, "inat-thumb-" .. tostring(observation.id) .. ".jpg")
+    local tempPath = LrPathUtils.child(tempDir, "inat-thumb-" .. tostring(tempFileSuffix) .. ".jpg")
 
     local writeOk = pcall(function()
         local f = assert(io.open(tempPath, "wb"))
@@ -1057,6 +1055,31 @@ function INaturalist.downloadObservationThumbnail(observation)
     end)
 
     return writeOk and tempPath or nil
+end
+
+-- Downloads the FIRST photo of an already-pulled observation -- see
+-- downloadPhotoThumbnail above for the mechanics. Confirmed live: the
+-- downloaded file renders correctly via LrView's `picture` control (see
+-- buildINatThumbnail in INatSyncRunner.lua).
+function INaturalist.downloadObservationThumbnail(observation)
+    return downloadPhotoThumbnail(observation.photos and observation.photos[1], observation.id)
+end
+
+-- Downloads EVERY photo on an observation, not just the first -- for
+-- dialogs where seeing the whole set side by side is worth the extra
+-- (cheap -- these are already-small "square" thumbnails, not originals)
+-- downloads. Returns a list of temp paths in the same order as
+-- observation.photos; a photo whose own download failed is simply
+-- omitted, never blocks showing the ones that worked.
+function INaturalist.downloadAllObservationThumbnails(observation)
+    local paths = {}
+    for i, photo in ipairs(observation.photos or {}) do
+        local path = downloadPhotoThumbnail(photo, tostring(observation.id) .. "-" .. tostring(i))
+        if path then
+            table.insert(paths, path)
+        end
+    end
+    return paths
 end
 
 -- Substitutes the size segment of an iNat photo URL (e.g.

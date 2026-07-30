@@ -49,24 +49,12 @@ return {
             file = "SyncFromINaturalist.lua",
         },
         {
-            title = "Full Sync from iNaturalist",
-            file = "FullSyncFromINaturalist.lua",
-        },
-        {
-            title = "Recover Missing Photos from iNaturalist",
-            file = "RecoverMissingPhotos.lua",
-        },
-        {
             title = "Show iNat Sync State (one-off)",
             file = "ShowINatSyncState.lua",
         },
         {
             title = "Show Observation Filenames (one-off)",
             file = "ShowObservationFilenames.lua",
-        },
-        {
-            title = "Rebuild Mismatch List (one-off)",
-            file = "RebuildMismatchList.lua",
         },
     },
 

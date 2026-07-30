@@ -135,6 +135,22 @@ end
 -- of a common species on different days won't usually both qualify.
 local WIDENING_TIME_TOLERANCE_SECONDS = 12 * 3600
 
+-- How much further beyond WIDENING_TIME_TOLERANCE_SECONDS a same-species
+-- closestMiss can be and still plausibly be the SAME photo, just
+-- mis-correlated (e.g. a timezone bug), rather than an unrelated sighting
+-- of the same species on a completely different occasion -- used by
+-- pullAndMatch to decide whether a "no local match" outcome is genuinely
+-- uncertain (worth a cautious notice, never an auto-download offer) or
+-- confidently empty (safe to offer a download). Confirmed live 2026-07-29:
+-- a closestMiss 64+ hours away was being treated as "uncertain" even
+-- though it was obviously just a coincidental same-species photo from
+-- days earlier -- every real clock-skew/timezone case actually
+-- investigated this session (see the #385810257 writeup) was at most a
+-- few hours, nowhere near this. Kept generous enough (24h) to allow for a
+-- same-day-but-badly-timezoned mistake without swallowing every unrelated
+-- same-species sighting from a different day into "uncertain."
+local CLOSEST_MISS_STILL_UNCERTAIN_SECONDS = 24 * 3600
+
 -- Widens a single observation's candidate pool beyond the time window: any
 -- already-tagged group sharing the observation's current scientific name
 -- AND within WIDENING_TIME_TOLERANCE_SECONDS of its true instant, not
@@ -496,27 +512,33 @@ end
 --
 -- Returns { toApply = { {group, observation}, ... }, toResolveManually =
 -- { {groups, observations, claimedAwayReason}, ... }, noLocalMatchObservations
--- = { observation, ... }, noLocalMatchReasons, photosByFilename,
--- untaggedSingletonsSortedByTime = (both see buildLocalIndex) }. `toApply`
--- entries are unambiguous and ready for applyMatch() (photosByFilename and
--- untaggedSingletonsSortedByTime should both be passed through to each
--- call, to absorb untagged sibling photos); `toResolveManually` entries
--- need a user decision (more than one plausible local group AND more than
--- one plausible observation collided at the same timestamp, with no
--- existing tag to disambiguate automatically) -- `claimedAwayReason`
--- (a string, or nil) explains any candidate that would ALSO have been
--- offered here but was already claimed by another observation this run,
--- so a collision missing its obviously-correct candidate is traceable
--- rather than just showing whichever wrong candidates remain (confirmed
--- live: observation #384538787's real match, already tagged with the
--- right species, was entirely absent from its own collision's candidate
--- list). `noLocalMatchObservations` is the FULL observation list (not
--- just a count) specifically so a full per-run log can record which
--- observations these were, not just how many. `noLocalMatchReasons`
--- (keyed by observation id) is the same claimed-away explanation for the
--- #candidateGroups == 0 case specifically (confirmed live: a real,
--- otherwise untraceable case where the right local group existed but had
--- already been claimed by an unrelated, earlier-processed observation).
+-- = { observation, ... }, noLocalMatchReasons, noLocalMatchUncertain,
+-- photosByFilename, untaggedSingletonsSortedByTime = (both see
+-- buildLocalIndex) }. `toApply` entries are unambiguous and ready for
+-- applyMatch() (photosByFilename and untaggedSingletonsSortedByTime should
+-- both be passed through to each call, to absorb untagged sibling photos);
+-- `toResolveManually` entries need a user decision (more than one plausible
+-- local group AND more than one plausible observation collided at the same
+-- timestamp, with no existing tag to disambiguate automatically) --
+-- `claimedAwayReason` (a string, or nil) explains any candidate that would
+-- ALSO have been offered here but was already claimed by another
+-- observation this run, so a collision missing its obviously-correct
+-- candidate is traceable rather than just showing whichever wrong
+-- candidates remain (confirmed live: observation #384538787's real match,
+-- already tagged with the right species, was entirely absent from its own
+-- collision's candidate list). `noLocalMatchObservations` is the FULL
+-- observation list (not just a count) specifically so a full per-run log
+-- can record which observations these were, not just how many.
+-- `noLocalMatchReasons` (keyed by observation id) is the same claimed-away
+-- explanation for the #candidateGroups == 0 case specifically (confirmed
+-- live: a real, otherwise untraceable case where the right local group
+-- existed but had already been claimed by an unrelated, earlier-processed
+-- observation). `noLocalMatchUncertain` (keyed by observation id -> true/
+-- nil) is the caller-facing signal for whether that reason is genuinely
+-- uncertain (a real candidate exists but is claimed away or plausibly the
+-- same photo mis-correlated) vs. safely confident (nothing local at all,
+-- or a same-species match too far away in time to be relevant) -- see
+-- CLOSEST_MISS_STILL_UNCERTAIN_SECONDS.
 function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     local catalog = LrApplication.activeCatalog()
     local sortedGroups, byINatId, photosByFilename, untaggedSingletonsSortedByTime, groupsByScientificName =
@@ -550,6 +572,17 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
     -- processed, unrelated observation purely by coincidental time
     -- proximity).
     local noLocalMatchReasons = {}
+    -- Keyed by observation id -> true only when the "no local match"
+    -- outcome above should be treated as UNCERTAIN (worth a cautious
+    -- notice, never an auto-download offer) rather than confidently empty
+    -- (safe to offer a download) -- see CLOSEST_MISS_STILL_UNCERTAIN_SECONDS.
+    -- Always true for a claimedAway reason (a real, within-tolerance
+    -- candidate exists RIGHT NOW, just already assigned elsewhere this
+    -- run -- downloading over that risks a genuine duplicate); for a
+    -- closestMiss reason, only true when the gap is small enough to
+    -- plausibly be the same photo mis-correlated, not just a coincidental
+    -- same-species sighting from a different occasion entirely.
+    local noLocalMatchUncertain = {}
     local handled = {}
 
     -- Tracks which local groups have already been assigned to some
@@ -635,7 +668,13 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
 
                 if #candidateGroups == 0 then
                     table.insert(noLocalMatchObservations, observation)
-                    noLocalMatchReasons[observation.id] = describeClaimedAway(claimedAway) or describeClosestMiss(closestMiss)
+                    local claimedAwayText = describeClaimedAway(claimedAway)
+                    noLocalMatchReasons[observation.id] = claimedAwayText or describeClosestMiss(closestMiss)
+                    if claimedAwayText then
+                        noLocalMatchUncertain[observation.id] = true
+                    elseif closestMiss then
+                        noLocalMatchUncertain[observation.id] = closestMiss.deltaSeconds <= CLOSEST_MISS_STILL_UNCERTAIN_SECONDS
+                    end
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
                     claimedGroups[candidateGroups[1]] = observation
@@ -697,6 +736,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
         toResolveManually = toResolveManually,
         noLocalMatchObservations = noLocalMatchObservations,
         noLocalMatchReasons = noLocalMatchReasons,
+        noLocalMatchUncertain = noLocalMatchUncertain,
         photosByFilename = photosByFilename,
         untaggedSingletonsSortedByTime = untaggedSingletonsSortedByTime,
         pullDebug = pullDebug,

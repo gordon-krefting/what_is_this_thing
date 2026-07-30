@@ -1,4 +1,4 @@
--- "Recover Missing Photos from iNaturalist": downloads iNat's own copy of
+-- Recovery logic for "Sync from iNaturalist": downloads iNat's own copy of
 -- photos that have no local counterpart at all, or fills in specific
 -- photos missing from an already-matched local group -- see the design
 -- plan and DEVELOPMENT_NOTES.md for the full rationale (iNat caps every
@@ -6,8 +6,11 @@
 -- are accepted placeholders, not a substitute for a real backup).
 --
 -- Mirrors the INatSync.lua / INatSyncRunner.lua split: this file holds
--- the logic (testable via mocks), RecoverMissingPhotos.lua holds the LR
--- dialog/progress-scope orchestration.
+-- the logic (testable via mocks), INatSyncRunner.lua calls recoverTotalLoss/
+-- recoverPartialLoss inline, per observation, during its own sync run --
+-- recovery was originally its own separate "Recover Missing Photos from
+-- iNaturalist" command/dialog layer, folded into the unified sync run as
+-- part of the 2026-07-29 consolidation (DEVELOPMENT_NOTES.md).
 local LrApplication = import 'LrApplication'
 local LrPathUtils = import 'LrPathUtils'
 local LrFileUtils = import 'LrFileUtils'
@@ -31,38 +34,6 @@ function INatRecovery.recoveryDestDir()
     local home = LrPathUtils.getStandardFilePath("home")
     local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "import")
     return LrPathUtils.child(dir, "RecoveredFromINat")
-end
-
--- Sources BOTH candidate lists from a single full-history pull (exactly
--- what "Full Sync from iNaturalist" already does) -- no changes needed to
--- INatSync.lua's matching logic, and no need to export its private
--- buildLocalIndex:
---   - totalLoss: report.noLocalMatchObservations, directly.
---   - partialLoss: report.toApply entries whose observation id is in the
---     durable pending-mismatch list (INatSync.getPendingMismatchIds()) --
---     that list is what the regular sync already maintains every run, so
---     recovery doesn't need to freshly (re-)detect mismatches itself; it
---     just consumes what's already tracked. group.photos on each match is
---     the real, current local LrPhoto set to absorb into.
-function INatRecovery.findCandidates(username, onProgress)
-    local report = INatSync.pullAndMatch(username, nil, {}, onProgress)
-
-    local pendingMismatchLookup = {}
-    for _, id in ipairs(INatSync.getPendingMismatchIds()) do
-        pendingMismatchLookup[id] = true
-    end
-
-    local partialLoss = {}
-    for _, match in ipairs(report.toApply) do
-        if pendingMismatchLookup[match.observation.id] then
-            table.insert(partialLoss, match)
-        end
-    end
-
-    return {
-        totalLoss = report.noLocalMatchObservations,
-        partialLoss = partialLoss,
-    }
 end
 
 -- Writes GPS (and the approximateLocation flag when iNat reports the
