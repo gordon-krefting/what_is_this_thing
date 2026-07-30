@@ -2697,6 +2697,84 @@ to the raw value for anything unrecognized) and updated the quality-grade
 line in `changes` to use it. Updated the existing `mock_test_inatsync.lua`
 assertion to expect the display label, not the raw value.
 
+## Same truncation bug, second dialog: `resolveClusterManually`'s radio labels (2026-07-30)
+
+Live-tested screenshot showed the exact same "(currently tagged:" cutoff
+already fixed in `confirmNewLink` -- turned out `resolveClusterManually`'s
+per-candidate radio buttons ALSO used `describeCandidateGroups`'
+filename-list-plus-species-name string as their own single-line title,
+squeezed into the same 22-char-wide constraint. User explicitly didn't
+want the dialog widened to fit it.
+
+Fix: reused `describeLocalIdentification` (moved earlier in the file, to
+before `resolveClusterManually`, so it's defined before this new use).
+Each radio's own title is now just the plain filename(s) -- short, and
+the actual selectable label -- with the species-identification line as a
+SEPARATE `static_text` underneath, `width_in_chars = 22` (same width as
+before) but `height_in_lines = 2` so it wraps instead of truncating. Same
+narrow dialog width throughout, just a couple of lines taller per
+candidate when a real species name is present. `describeCandidateGroups`
+itself is unchanged -- still used verbatim for the plain-text retry-list
+log detail, where a verbose one-line string is fine (no UI width
+constraint there).
+
+## Real matching bug found via live testing: collision resolution used the wrong taxon name (2026-07-30, "plover" incident)
+
+Live sync mis-linked two brand-new observations of the same species
+(shorebirds, shot seconds apart during upload of 2016 archival photos):
+DSC_1799.NEF (correct match: a Semipalmated Plover standing on a rock)
+got silently claimed by the WRONG observation (one showing plovers in
+flight, whose real local match was DSC_1800.NEF), while the observation
+that actually belonged to DSC_1799 got a "no good candidate" notice
+instead. Diagnosed with real data end to end: extracted embedded JPEG
+previews from both NEFs via `exiftool -b -PreviewImage` and downloaded
+both iNat photos directly for a visual side-by-side (confirmed the
+mismatch conclusively, not just from timestamps), then found via direct
+SQLite queries that the local candidate pool was more complex than
+assumed -- the camera reuses filenames after wrapping past DSC_9999
+(confirmed by the user), so a naive `WHERE file.baseName = 'DSC_1800'`
+query without also joining on folder path conflated THREE unrelated
+photos from 2016/2019/2026 that happen to share a filename -- a real
+trap worth remembering for any future ad hoc catalog queries in this
+project.
+
+**Root cause, confirmed by the user**: DSC_1800 was tagged locally as
+"Charadriiformes" (the order) at the time of upload -- that identification
+is what actually generated the observation. Before this sync ran, another
+iNat user corrected the observation's identification to species level,
+"Charadrius semipalmatus". `pairByScientificName` (collision resolution)
+and `widenCandidatesByScientificName` (the clock-skew-rescue fallback)
+both compared a local group's tag against `observation.taxon.name` --
+iNat's CURRENT identification -- via exact string match. Once corrected,
+that current taxon no longer matched the local tag at all, so the group
+carrying the *correct* original identification could never auto-resolve,
+while an unrelated already-species-tagged photo taken seconds later
+looked like the (wrong) unambiguous answer.
+
+**Fix**: added `firstIdentificationTaxonName(observation, username)` in
+`INatSync.lua` -- finds the OWNER's own EARLIEST identification (by
+`created_at`, reusing `parseIsoTimestamp` the same way
+`describeUnrespondedSuggestion` already does) and returns its taxon name,
+falling back to `observation.taxon.name` only if the owner never
+identified it at all. Both `pairByScientificName` and
+`widenCandidatesByScientificName` now compare against this instead of the
+observation's current taxon. Deliberately scoped narrowly: this only
+changes the *matching* comparison (which local photo does this iNat post
+correspond to) -- deciding whether to *update* an already-linked photo's
+tag still correctly uses the CURRENT identification
+(`candidateDiffersFromLocal`/`applyMatch`), since pulling in community
+corrections after the fact is the whole point of that separate mechanism.
+
+Testing: existing `mock_test_inatsync.lua` suite passed unchanged before
+any new test was added, confirming backward compatibility; added Case 13,
+directly reproducing the live scenario (two colliding observations, one
+whose current taxon was corrected after upload) and confirming both now
+resolve to their correct local groups. Hit Lua's 200-local-per-function
+limit adding this (`mock_test_inatsync.lua` has grown to ~1600 lines over
+the session) -- worked around by bundling the new fixtures into one table
+(`plover.photoOriginalOrder`, etc.) instead of several top-level locals,
+rather than touching unrelated existing code to make room.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

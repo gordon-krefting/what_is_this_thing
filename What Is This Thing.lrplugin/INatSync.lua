@@ -120,6 +120,43 @@ local function parseIsoTimestamp(iso)
     )
 end
 
+-- The taxon name to use for MATCHING a local photo's existing tag against
+-- an iNat observation -- deliberately the OWNER's OWN FIRST (earliest by
+-- created_at) identification, NOT `observation.taxon.name` (iNat's
+-- CURRENT identification, which reflects the latest community consensus
+-- and can drift after upload for reasons that have nothing to do with
+-- which local photo is which). Confirmed live 2026-07-30: a local photo
+-- tagged "Charadriiformes" (the order -- what the user's own original ID
+-- actually said) failed to auto-resolve against its correct observation
+-- because another identifier had since corrected the CURRENT identification
+-- to "Charadrius semipalmatus" (species level) -- an exact-string
+-- comparison against the current taxon could never match the original tag,
+-- even though the original tag is exactly what generated this observation
+-- in the first place (via the identify-then-export-then-upload flow). The
+-- owner's first identification is the stable anchor for "does this local
+-- tag correspond to this iNat post" -- the CURRENT identification remains
+-- the right thing to compare against for deciding whether to UPDATE an
+-- ALREADY-linked photo's tag (see candidateDiffersFromLocal/applyMatch),
+-- a separate concern this does not touch.
+--
+-- Falls back to observation.taxon.name if the owner has no identification
+-- on the observation at all (unusual -- the initial upload's own
+-- auto-suggested ID is normally attributed to the owner immediately -- but
+-- not impossible for a bare-bones upload).
+local function firstIdentificationTaxonName(observation, username)
+    local earliest, earliestTime = nil, nil
+    for _, ident in ipairs(observation.identifications or {}) do
+        if ident.user and ident.user.login == username and ident.taxon and ident.taxon.name then
+            local t = parseIsoTimestamp(ident.created_at)
+            if t and (not earliestTime or t < earliestTime) then
+                earliest = ident.taxon.name
+                earliestTime = t
+            end
+        end
+    end
+    return earliest or (observation.taxon and observation.taxon.name)
+end
+
 -- How far apart (in absolute seconds) a same-named group's capture time
 -- and an observation's true instant can be and still count as "the same
 -- outing" for widenCandidatesByScientificName below. A direct absolute-time
@@ -152,7 +189,9 @@ local WIDENING_TIME_TOLERANCE_SECONDS = 12 * 3600
 local CLOSEST_MISS_STILL_UNCERTAIN_SECONDS = 24 * 3600
 
 -- Widens a single observation's candidate pool beyond the time window: any
--- already-tagged group sharing the observation's current scientific name
+-- already-tagged group sharing the observation's OWNER'S FIRST identification
+-- (see firstIdentificationTaxonName -- NOT necessarily the observation's
+-- current/latest taxon, which can drift after a community correction)
 -- AND within WIDENING_TIME_TOLERANCE_SECONDS of its true instant, not
 -- already a candidate and not already claimed by another observation this
 -- run, gets added too. Exists specifically for the camera-clock-skew case
@@ -192,13 +231,14 @@ local CLOSEST_MISS_STILL_UNCERTAIN_SECONDS = 24 * 3600
 -- camera's actual GPS-verified capture instant) -- so the observation's
 -- parsed target time was already off by over an hour before local
 -- matching even started.
-local function widenCandidatesByScientificName(candidateGroups, groupsByScientificName, observation, targetTime, claimedGroups)
+local function widenCandidatesByScientificName(candidateGroups, groupsByScientificName, observation, targetTime, claimedGroups, username)
     local claimedAway = {}
     local closestMiss = nil
-    if not (observation.taxon and observation.taxon.name and targetTime) then
+    local matchName = firstIdentificationTaxonName(observation, username)
+    if not (matchName and targetTime) then
         return candidateGroups, claimedAway, closestMiss
     end
-    local sameNameGroups = groupsByScientificName[observation.taxon.name]
+    local sameNameGroups = groupsByScientificName[matchName]
     if not sameNameGroups then
         return candidateGroups, claimedAway, closestMiss
     end
@@ -430,18 +470,24 @@ end
 
 -- Tries to uniquely pair each candidate local group against one of the
 -- colliding iNat observations by comparing the group's existing
--- `scientificName` against each observation's `taxon.name`. This is what
--- lets a virtual-copy timestamp collision resolve itself automatically.
--- `candidateGroups` is always already tagged by the time it reaches here
--- (pullAndMatch filters out untagged groups entirely before calling this
--- -- see the comment there), so every group passed in has a name to
--- compare; a group only ends up in leftoverGroups here because its name
--- doesn't uniquely match any of the colliding observations, not because
--- it has no name at all.
+-- `scientificName` against each observation's OWNER'S FIRST identification
+-- (see firstIdentificationTaxonName -- deliberately NOT each observation's
+-- current/latest `taxon.name`, which can drift after a community
+-- correction and then never exact-match the local tag that actually
+-- generated the upload in the first place -- confirmed live 2026-07-30: a
+-- local "Charadriiformes" tag failed to auto-resolve against its own
+-- observation once another identifier had since corrected it to
+-- "Charadrius semipalmatus"). This is what lets a virtual-copy timestamp
+-- collision resolve itself automatically. `candidateGroups` is always
+-- already tagged by the time it reaches here (pullAndMatch filters out
+-- untagged groups entirely before calling this -- see the comment there),
+-- so every group passed in has a name to compare; a group only ends up in
+-- leftoverGroups here because its name doesn't uniquely match any of the
+-- colliding observations, not because it has no name at all.
 --
 -- Returns resolved (a list of { group, observation }), leftoverGroups,
 -- leftoverObservations.
-local function pairByScientificName(candidateGroups, candidateObservations)
+local function pairByScientificName(candidateGroups, candidateObservations, username)
     local resolved = {}
     local usedGroups, usedObservationIndexes = {}, {}
 
@@ -464,7 +510,7 @@ local function pairByScientificName(candidateGroups, candidateObservations)
         if group.scientificName and groupCountByName[group.scientificName] == 1 then
             local matchIndex, matchCount = nil, 0
             for i, obs in ipairs(candidateObservations) do
-                if not usedObservationIndexes[i] and obs.taxon and obs.taxon.name == group.scientificName then
+                if not usedObservationIndexes[i] and firstIdentificationTaxonName(obs, username) == group.scientificName then
                     matchIndex = i
                     matchCount = matchCount + 1
                 end
@@ -657,7 +703,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                 local closestMiss = nil
                 if #candidateGroups == 0 then
                     local widenedGroups, widenedClaimedAway, widenedClosestMiss = widenCandidatesByScientificName(
-                        candidateGroups, groupsByScientificName, observation, time, claimedGroups
+                        candidateGroups, groupsByScientificName, observation, time, claimedGroups, username
                     )
                     candidateGroups = widenedGroups
                     closestMiss = widenedClosestMiss
@@ -695,7 +741,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                     end
 
                     local resolved, leftoverGroups, leftoverObservations =
-                        pairByScientificName(candidateGroups, collisionObservations)
+                        pairByScientificName(candidateGroups, collisionObservations, username)
 
                     for _, pair in ipairs(resolved) do
                         table.insert(toApply, pair)

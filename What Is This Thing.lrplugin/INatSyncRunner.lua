@@ -85,6 +85,22 @@ local function describeCandidateGroups(groups)
     return labels
 end
 
+-- "Locally identified as: <name>" (or "Not yet identified locally.") --
+-- what a local observation (group of photos) is currently tagged as,
+-- independent of any iNat link. Shown as its own wrappable line (see
+-- callers -- width_in_chars + height_in_lines, not squeezed into a
+-- single-line radio/checkbox title) rather than folded into
+-- describeCandidateGroups' filename-list string, which truncated badly
+-- once a real species name was appended (confirmed live in both
+-- confirmNewLink and resolveClusterManually's dialogs).
+local function describeLocalIdentification(group)
+    if group.scientificName then
+        local label = group.commonName and (group.commonName .. " (" .. group.scientificName .. ")") or group.scientificName
+        return "Locally identified as: " .. label
+    end
+    return "Not yet identified locally."
+end
+
 -- "#<id> -- <common name> (<scientific name>) -- N photo(s)" -- anchors
 -- the collision dialog and the new-link confirmation dialog on what iNat
 -- itself reliably reports (the taxon and the photo count, both already
@@ -266,13 +282,31 @@ local function resolveClusterManually(cluster)
 
                 local candidateColumns = {}
                 for i, group in ipairs(remainingGroups) do
+                    -- Radio title is just the filename(s) -- short, and the
+                    -- actual selectable label. The species tag (which can
+                    -- run long) is a SEPARATE, wrappable line underneath --
+                    -- confirmed live: cramming both into one narrow
+                    -- single-line radio title truncated badly the moment a
+                    -- real species name was present ("IMG_1988.JPG
+                    -- (currently tagged:" with nothing after it). Wrapping
+                    -- onto a couple of lines keeps the dialog's WIDTH
+                    -- exactly as narrow as before -- only adds height.
+                    local filenames = {}
+                    for _, photo in ipairs(group.photos) do
+                        table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
+                    end
                     local radio = f:radio_button {
-                        title = labelForGroup[group],
+                        title = table.concat(filenames, ", "),
                         value = LrView.bind("selectedIndex"),
                         checked_value = i,
                         width_in_chars = 22,
                     }
-                    table.insert(candidateColumns, buildCandidateColumn(f, group, radio))
+                    local identificationLine = f:static_text {
+                        title = describeLocalIdentification(group),
+                        width_in_chars = 22,
+                        height_in_lines = 2,
+                    }
+                    table.insert(candidateColumns, buildCandidateColumn(f, group, f:column { radio, identificationLine }))
                 end
 
                 local inatThumbnail, inatThumbnailTempPath = buildINatThumbnail(f, obs)
@@ -313,19 +347,6 @@ local function resolveClusterManually(cluster)
     end
 
     return resolvedPairs, unresolvedObservations, groupLabels
-end
-
--- "Locally identified as: <name>" (or "Not yet identified locally.") --
--- what a local observation (group of photos) is currently tagged as,
--- independent of any iNat link. Used by confirmNewLink instead of a
--- filename list -- which files are in the group matters far less here
--- than whether/how it's already identified.
-local function describeLocalIdentification(group)
-    if group.scientificName then
-        local label = group.commonName and (group.commonName .. " (" .. group.scientificName .. ")") or group.scientificName
-        return "Locally identified as: " .. label
-    end
-    return "Not yet identified locally."
 end
 
 -- Confirms a brand-new iNat link before it's applied, even when the match
