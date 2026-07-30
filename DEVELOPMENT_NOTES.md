@@ -2812,6 +2812,42 @@ array positions. Cases 1b/1c confirm the status section correctly shows
 time + combined pending count ("3 hours ago", "3 observations still
 pending" from 1 retry + 2 mismatch entries) with populated state.
 
+## Real bug found via live testing: "unresolved collisions" count didn't match what was actually shown or logged (2026-07-30)
+
+Live sync closing summary reported "1 left unresolved (skipped in the
+match dialog)" after a run where the user reported resolving every
+dialog they were actually shown -- confirmed live: `inat-sync-log.txt`
+had zero `unresolved_collision` entries for that run at all, meaning the
+"1" had no corresponding trace anywhere.
+
+**Root cause**: a collision cluster's `unresolvedCollisions` count was
+computed from leftover CANDIDATE GROUPS (`#cluster.groups - #resolved`,
+or bare `#cluster.groups` in the run-canceled branch), not from
+`#unresolvedObservations` -- the thing that's actually logged and shown
+to the user. A cluster can genuinely have more candidate local groups
+than colliding observations (an extra nearby photo that just isn't any
+of these particular iNat posts, entirely normal) -- when that happens,
+the user can resolve every observation dialog they're shown perfectly,
+yet the group-based count still comes out positive, with nothing behind
+it: no log entry, no Needs Attention report entry, nothing.
+
+**Fix**: both increments in `INatSyncRunner.lua` now use the actual
+observation count that gets logged in that same branch --
+`#unresolvedObservations` in the normal path, `#cluster.observations` in
+the run-canceled path -- so the count can never diverge from what's
+traceable.
+
+Testing: added `mock_test_inatsyncrunner.lua` Case 13, constructing a
+cluster with 2 same-named local candidate groups but only 1 colliding
+observation (deliberately same scientificName on both groups so
+`pairByScientificName` can't auto-resolve either side), accepting the
+dialog's default choice, and asserting the closing summary message
+(newly captured via the `LrDialogs.message` stub, `lastSummaryMessage`)
+does NOT contain "left unresolved". Building this test surfaced two
+missing mock stubs (`f:catalog_photo`, needed by `buildCandidateColumn`)
+that had simply never been exercised by this test file before -- added
+rather than worked around.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

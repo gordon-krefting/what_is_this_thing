@@ -1172,7 +1172,18 @@ function INatSyncRunner.run(options)
                             photoUrl = firstPhotoUrl(obs),
                         })
                     end
-                    counts.unresolvedCollisions = counts.unresolvedCollisions + (#cluster.groups - #resolved)
+                    -- Deliberately #unresolvedObservations, NOT
+                    -- (#cluster.groups - #resolved) -- confirmed live
+                    -- 2026-07-30: a cluster can have more candidate LOCAL
+                    -- GROUPS than colliding OBSERVATIONS (an extra nearby
+                    -- photo that isn't actually any of these iNat posts,
+                    -- entirely normal), which left the group-based count
+                    -- positive even when every observation the user was
+                    -- actually shown got resolved -- an "unresolved" count
+                    -- with no corresponding log/report entry at all, since
+                    -- only observations ever get logged. This must always
+                    -- match what's actually logged above.
+                    counts.unresolvedCollisions = counts.unresolvedCollisions + #unresolvedObservations
                 end
             else
                 -- The whole run was canceled before manual resolution even
@@ -1196,7 +1207,11 @@ function INatSyncRunner.run(options)
                             photoUrl = firstPhotoUrl(obs),
                         })
                     end
-                    counts.unresolvedCollisions = counts.unresolvedCollisions + #cluster.groups
+                    -- Same fix as the non-canceled branch above -- count
+                    -- what was actually logged (every observation in this
+                    -- cluster), not the candidate group count, which can
+                    -- differ.
+                    counts.unresolvedCollisions = counts.unresolvedCollisions + #cluster.observations
                 end
             end
 
