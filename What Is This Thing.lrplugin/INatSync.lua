@@ -330,6 +330,41 @@ end
 -- stays a bare "no_local_match" with no further detail, since there's
 -- nothing more specific to say. Returns nil if there's nothing to
 -- report.
+-- Temporary diagnostic (2026-07-31): appends one line per claim decision
+-- to a fixed log file, so a recurring "already claimed by an implausible
+-- observation" report (confirmed live twice now, both cases NOT
+-- reproducible from a clean-slate offline repro against the same
+-- observations -- see DEVELOPMENT_NOTES.md) can be traced from an actual
+-- live run instead of reconstructed after the fact. Silently no-ops if
+-- the directory doesn't exist rather than risk breaking a real sync over
+-- a debug log. Remove once the mechanism behind this is confirmed.
+local function logClaim(mechanism, group, observation)
+    pcall(function()
+        local home = LrPathUtils.getStandardFilePath("home")
+        local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
+        dir = LrPathUtils.child(dir, "WhatIsThisThing")
+        local path = LrPathUtils.child(dir, "inat-sync-claim-trace.log")
+        local filenames = {}
+        for _, photo in ipairs(group.photos) do
+            table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
+        end
+        local f = io.open(path, "a")
+        if f then
+            f:write(string.format(
+                "[%s] group{%s time=%s species=%s} claimed by #%s (%s observed %s)\n",
+                mechanism,
+                table.concat(filenames, ","),
+                tostring(group.time),
+                tostring(group.scientificName),
+                tostring(observation.id),
+                observation.taxon and observation.taxon.name or "?",
+                tostring(observation.time_observed_at)
+            ))
+            f:close()
+        end
+    end)
+end
+
 local function describeClosestMiss(closestMiss)
     if not closestMiss then
         return nil
@@ -714,6 +749,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
             if fastGroup then
                 table.insert(toApply, { group = fastGroup, observation = observation })
                 claimedGroups[fastGroup] = observation
+                logClaim("fastpath", fastGroup, observation)
             else
                 local time = parseIsoTimestamp(observation.time_observed_at)
                 -- Wide tolerance only for observations that actually show
@@ -784,6 +820,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
                     claimedGroups[candidateGroups[1]] = observation
+                    logClaim("single-candidate", candidateGroups[1], observation)
                 else
                     -- Genuine collision: gather every other not-yet-handled
                     -- pulled observation within tolerance of this same
@@ -806,6 +843,7 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                     for _, pair in ipairs(resolved) do
                         table.insert(toApply, pair)
                         claimedGroups[pair.group] = pair.observation
+                        logClaim("collision-resolved", pair.group, pair.observation)
                     end
 
                     if #leftoverGroups > 0 and #leftoverObservations > 0 then

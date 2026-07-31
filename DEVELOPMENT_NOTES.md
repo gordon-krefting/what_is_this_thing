@@ -3037,6 +3037,66 @@ No new test case added for the delta text itself -- there's no confirmed
 repro to write a case against yet; revisit if this recurs with the
 improved message in hand.
 
+## Cross-species "already claimed" bug recurred; added a live claim-trace log (2026-07-31)
+
+Recurred with a different pair during the same Arizona bulk upload:
+observation #386857897 (Calypte costae) reported both its candidate
+photos "already claimed" -- one by #386857888 (also Calypte costae, a
+plausible pairing) and one by #386857844 (Cylindropuntia, a cactus --
+implausible, same shape as the earlier coachwhip/saguaro case). The
+displayed time deltas for these two also looked swapped relative to the
+photos' and observations' real timestamps (verified directly via SQLite
+and the iNat API) -- "0h 0m away" and "2h 59m away" landed on the wrong
+lines. `describeClaimedAway`'s code was re-read carefully and is airtight
+per-entry (filenames, claimant label, and delta all come from the same
+loop-local `entry`), so a display-only swap bug there seems unlikely --
+more likely the underlying `claimedGroups` bookkeeping itself is
+attributing the wrong claimant, which would also explain the previous
+incident.
+
+A second real-data repro (same technique as before: real local tags for
+this whole day + the real, saved 70-observation API response, run through
+the actual, unmodified `INatSync.pullAndMatch`) again resolved ALL THREE
+observations (#386857844, #386857888, #386857897) correctly with zero
+collisions -- confirming, a second time, that the deterministic matching
+logic is correct for this exact data in isolation. Whatever produces the
+live mismatch depends on run state not reconstructable from outside
+Lightroom (a wider pull scope, retry-list carryover, or something else
+entirely).
+
+**Added `logClaim` (`INatSync.lua`)**: a temporary, pcall-wrapped debug
+trace appending one line per claim decision (group filenames/time/species,
+claiming observation id/taxon/declared time, and which of the three claim
+sites fired -- fastpath/single-candidate/collision-resolved) to
+`~/Photos/local/WhatIsThisThing/inat-sync-claim-trace.log`. Silently
+no-ops if the directory doesn't exist, so it can't break a real sync.
+Next actual occurrence should be directly diagnosable from this log
+instead of needing another offline reconstruction. Remove once the
+mechanism is confirmed (or once the two-phase matching redesign discussed
+with the user -- see below -- makes greedy per-group claim order moot).
+
+**Open design question raised by the user, not yet acted on**: the current
+matching pass is a single greedy, order-dependent scan -- observations are
+processed in whatever order the API returns them (`updated_at` ascending,
+i.e. upload/update order, unrelated to match quality), and the first
+observation to reach a candidate group keeps it permanently
+(`claimedGroups`), even if a later-processed observation would have been
+the objectively better match. The user's proposed alternative: a two-phase
+pass -- first compute every observation's full candidate set without
+claiming anything, then resolve all matches globally (e.g. by ascending
+time-delta) rather than first-come-first-served -- would eliminate this
+whole class of order-dependent mis-claiming. Not yet designed or
+implemented; the user asked to chase the claim-trace bug first. Revisit
+once the trace log has captured a real occurrence.
+
+Testing: full `lua5.4` syntax sweep plus all four mock suites
+(`mock_test_inatsync.lua`, `mock_test_inatsyncrunner.lua`,
+`mock_test_inatrecovery.lua`, `mock_test_mergeobservation.lua`) pass
+unchanged -- `logClaim` is pcall-wrapped and each test's
+`LrPathUtils.getStandardFilePath` stub points at a sandboxed/nonexistent
+path, confirmed not to write into the real
+`~/Photos/local/WhatIsThisThing/` directory.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
