@@ -339,7 +339,7 @@ end
 -- the directory doesn't exist rather than risk breaking a real sync over
 -- a debug log. Remove once the mechanism behind this is confirmed.
 local function logClaim(mechanism, group, observation)
-    pcall(function()
+    local ok, err = pcall(function()
         local home = LrPathUtils.getStandardFilePath("home")
         local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
         dir = LrPathUtils.child(dir, "WhatIsThisThing")
@@ -348,21 +348,37 @@ local function logClaim(mechanism, group, observation)
         for _, photo in ipairs(group.photos) do
             table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
         end
-        local f = io.open(path, "a")
-        if f then
-            f:write(string.format(
-                "[%s] group{%s time=%s species=%s} claimed by #%s (%s observed %s)\n",
-                mechanism,
-                table.concat(filenames, ","),
-                tostring(group.time),
-                tostring(group.scientificName),
-                tostring(observation.id),
-                observation.taxon and observation.taxon.name or "?",
-                tostring(observation.time_observed_at)
-            ))
-            f:close()
-        end
+        local f = assert(io.open(path, "a"))
+        f:write(string.format(
+            "[%s] group{%s time=%s species=%s} claimed by #%s (%s observed %s)\n",
+            mechanism,
+            table.concat(filenames, ","),
+            tostring(group.time),
+            tostring(group.scientificName),
+            tostring(observation.id),
+            observation.taxon and observation.taxon.name or "?",
+            tostring(observation.time_observed_at)
+        ))
+        f:close()
     end)
+    -- The first version of this silently no-op'd on ANY failure -- turned
+    -- out the log file never got written at all (first real live test,
+    -- 2026-07-31), with no way to tell why. This fallback writes straight
+    -- to $HOME itself (skipping the Photos/local/WhatIsThisThing
+    -- subdirectory, in case creating/finding THAT nested path is somehow
+    -- the actual problem) via the same LrPathUtils.getStandardFilePath
+    -- call already proven to work elsewhere in this file, so a real error
+    -- message surfaces somewhere instead of vanishing a second time.
+    if not ok then
+        pcall(function()
+            local home = LrPathUtils.getStandardFilePath("home")
+            local f = io.open(LrPathUtils.child(home, "inat-claim-trace-error.txt"), "a")
+            if f then
+                f:write(tostring(err) .. "\n")
+                f:close()
+            end
+        end)
+    end
 end
 
 local function describeClosestMiss(closestMiss)
