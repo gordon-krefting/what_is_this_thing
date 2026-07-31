@@ -2975,6 +2975,68 @@ via the full `lua5.4` syntax sweep and careful re-reading only, matching
 this project's established precedent for narrow, low-risk additions to
 files without prior test infrastructure.
 
+## Unexplained cross-species "already claimed" report during a large historical-photo upload (2026-07-31) -- diagnostic improved, root cause NOT found
+
+Live "No Good Candidate" notice for observation #386857880 (Masticophis
+flagellum / Common Coachwhip, `time_observed_at` 2018-04-29T10:39:00-07:00)
+during a ~70-observation bulk upload of old Arizona desert trip photos:
+"DSC_5958.NEF, DSC_5959.NEF already claimed this run by #386857845
+(Carnegiea gigantea)" -- but #386857845 (a saguaro) was declared at
+07:40:00, three hours away, a completely different species. Confirmed via
+direct SQLite query that `DSC_5958.NEF`/`DSC_5959.NEF` are already
+correctly tagged locally `Masticophis flagellum`, captured 10:39:05/:14 --
+essentially an exact time+species match for the coachwhip, nothing to do
+with the saguaro.
+
+Investigated by actually running the real matching code (`INatSync.lua`,
+unmodified) against real data, rather than reasoning about it in the
+abstract: built a throwaway repro (`repro_desert_collision.lua`, scratch
+dir) feeding a fake catalog populated with every real local photo/tag from
+`2018/Southwest/00 Tucson/2018-04-29/` (queried via SQLite) and the real,
+saved iNat API response for this user's actual pending pull (70
+observations, fetched directly, not synthesized). Needed a correct
+`LrDate.timeFromComponents` stand-in (the standard local/UTC round-trip
+trick via `os.date("*t")`/`os.date("!*t")`, since Lua's `os.time` has no
+native UTC-input mode) to get real, comparable absolute times -- both
+`WIDENING_TIME_TOLERANCE_SECONDS` (12h, species-gated) and the primary
+time-window search were confirmed, by inspecting the code directly, to be
+the only two places a group can be claimed, and neither can reach across
+a 3-hour, different-species gap under any parameter currently in the
+file. Also checked both observations' own `identifications` arrays
+directly from the real API response: both owners' first identifications
+exactly match their current taxon (no "plover"-style drift to blame
+either).
+
+**Result: the isolated repro resolved BOTH observations correctly** --
+the coachwhip matched its own two photos, the saguaro matched its own
+separate photo, no collision, exactly as expected. The bug did not
+reproduce with the exact real data available offline. Likely explanation:
+the live run's actual observations list was wider than the 70 fetched
+here (a broader `updated_since` window, or retry-list carryover from
+something unrelated), containing whatever *actually* claimed the group --
+but this couldn't be confirmed without live visibility into that specific
+run. Confirmed with the user this was an unrelated sync session from the
+plover incident, so not a repeat of that particular case's own root
+cause.
+
+**What changed instead**: `describeClaimedAway` (`INatSync.lua`) now
+includes the time delta between the claimed group's own capture time and
+the claiming observation's declared time in the message -- e.g. "...
+already claimed this run by #386857845 (Carnegiea gigantea, 3h 0m away)".
+Previously the message named the claimant but not how far away its
+declared time actually was, so a claim this obviously wrong (hours away,
+different species) required exactly the kind of offline reconstruction
+above just to notice something was suspicious. If this recurs, the
+dialog/log text itself will now make the anomaly immediately visible
+without needing a repro.
+
+Testing: full `mock_test_inatsync.lua`/`mock_test_inatsyncrunner.lua`
+suites pass unchanged (existing assertions check substrings via `:find`,
+not exact message equality, so the added suffix didn't need test updates).
+No new test case added for the delta text itself -- there's no confirmed
+repro to write a case against yet; revisit if this recurs with the
+improved message in hand.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

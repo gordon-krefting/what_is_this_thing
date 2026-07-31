@@ -296,6 +296,24 @@ local function describeClaimedAway(claimedAway)
             if entry.claimedBy.taxon then
                 claimLabel = claimLabel .. " (" .. entry.claimedBy.taxon.name .. ")"
             end
+            -- The delta between this group's own capture time and the
+            -- claiming observation's declared time -- normally seconds
+            -- (a genuine race for the same real photo), but surfacing it
+            -- explicitly means a claim that's actually hours away and a
+            -- different species entirely (a real, otherwise hard-to-
+            -- diagnose case, confirmed live 2026-07-31: a saguaro
+            -- observation was reported as claiming a coachwhip's own
+            -- correctly-tagged, correctly-timed photos 3 hours away) is
+            -- immediately visible from the dialog/log text alone, instead
+            -- of requiring an offline reconstruction to even notice
+            -- something is wrong.
+            local claimantTime = parseIsoTimestamp(entry.claimedBy.time_observed_at)
+            if entry.group.time and claimantTime then
+                local deltaSeconds = math.abs(entry.group.time - claimantTime)
+                local hours = math.floor(deltaSeconds / 3600)
+                local minutes = math.floor((deltaSeconds % 3600) / 60)
+                claimLabel = claimLabel .. string.format(", %dh %dm away", hours, minutes)
+            end
             table.insert(parts, table.concat(filenames, ", ") .. " already claimed this run by " .. claimLabel)
         end
     end
