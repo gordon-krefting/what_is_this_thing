@@ -267,18 +267,25 @@ end
 -- thumbnails) as radio choices; picking one removes it from the pool
 -- offered to the next observation in the same cluster.
 --
--- Returns resolvedPairs, unresolvedObservations, groupLabels. The second is
--- every observation left over once every candidate group in the cluster
--- has either been claimed or the pool ran out before reaching it -- this
--- includes anything skipped via "Skip For Now". The caller MUST feed these
--- into the retry list (INatSync.markRetryOutcome) -- without that, a
+-- Returns resolvedPairs, unresolvedObservations, groupLabels, aborted. The
+-- second is every observation left over once every candidate group in the
+-- cluster has either been claimed or the pool ran out before reaching it --
+-- this includes anything skipped via "Skip For Now". The caller MUST feed
+-- these into the retry list (INatSync.markRetryOutcome) -- without that, a
 -- skipped observation has no local match recorded and the `updated_since`
 -- cursor still advances past it, so it would otherwise vanish rather than
 -- being offered again next run (confirmed live: this was a real bug, not a
 -- hypothetical). `groupLabels` is every local candidate group's filenames
 -- (+ existing tag, if any) in the cluster (see describeCandidateGroups),
--- for the caller to fold into the sync log.
-local function resolveClusterManually(cluster)
+-- for the caller to fold into the sync log. `aborted` is true if "Abort
+-- Sync" was chosen partway through this cluster (2026-07-31, the same
+-- confusing-buttons complaint as showNoGoodCandidateNotice) -- the caller
+-- is responsible for calling progressScope:cancel() AND for treating every
+-- OTHER not-yet-reached cluster the same as this one's own unresolved
+-- observations, since resolveClusterManually only sees one cluster at a
+-- time. `progressLabel` (optional, e.g. " (Observation 5 of 23)") is
+-- appended to the dialog's title as-is.
+local function resolveClusterManually(cluster, progressLabel)
     local resolvedPairs = {}
     local remainingGroups = {}
     for _, group in ipairs(cluster.groups) do
@@ -291,9 +298,12 @@ local function resolveClusterManually(cluster)
         labelForGroup[group] = groupLabels[i]
     end
     local unresolvedObservations = {}
+    local aborted = false
 
     for _, obs in ipairs(cluster.observations) do
-        if #remainingGroups == 0 then
+        if aborted then
+            table.insert(unresolvedObservations, obs)
+        elseif #remainingGroups == 0 then
             table.insert(unresolvedObservations, obs)
         else
             local chosenIndex = nil
@@ -348,16 +358,19 @@ local function resolveClusterManually(cluster)
                 }
 
                 local result = LrDialogs.presentModalDialog {
-                    title = "Match iNat Observation",
+                    title = "Match iNat Observation" .. (progressLabel or ""),
                     contents = contents,
                     actionVerb = "Match",
                     cancelVerb = "Skip For Now",
+                    otherVerb = "Abort Sync",
                 }
 
                 cleanupINatThumbnail(inatThumbnailTempPath)
 
                 if result == "ok" then
                     chosenIndex = props.selectedIndex
+                elseif result == "other" then
+                    aborted = true
                 end
             end)
 
@@ -370,7 +383,7 @@ local function resolveClusterManually(cluster)
         end
     end
 
-    return resolvedPairs, unresolvedObservations, groupLabels
+    return resolvedPairs, unresolvedObservations, groupLabels, aborted
 end
 
 -- Confirms a brand-new iNat link before it's applied, even when the match
@@ -385,8 +398,11 @@ end
 -- Remaining") -- explicitly not wanted; every first-time link gets its
 -- own confirmation, every run.
 --
--- Returns "confirmed" or "skipped".
-local function confirmNewLink(match)
+-- Returns "confirmed", "skipped", or "abort" (2026-07-31, same
+-- confusing-buttons/missing-abort complaint as showNoGoodCandidateNotice
+-- and resolveClusterManually). `progressLabel` (optional, e.g.
+-- " (Observation 5 of 23)") is appended to the title as-is.
+local function confirmNewLink(match, progressLabel)
     local outcome = "skipped"
 
     LrFunctionContext.callWithContext("INatConfirmNewLink", function(context)
@@ -413,16 +429,19 @@ local function confirmNewLink(match)
         }
 
         local result = LrDialogs.presentModalDialog {
-            title = "Confirm New iNaturalist Link",
+            title = "Confirm New iNaturalist Link" .. (progressLabel or ""),
             contents = contents,
             actionVerb = "Confirm",
             cancelVerb = "Skip For Now",
+            otherVerb = "Abort Sync",
         }
 
         cleanupINatThumbnails(inatThumbnailPaths)
 
         if result == "ok" then
             outcome = "confirmed"
+        elseif result == "other" then
+            outcome = "abort"
         end
     end)
 
@@ -436,8 +455,9 @@ end
 -- the way the old standalone "Recover Missing Photos" command had one.
 -- `promptText` carries whichever of the two situations applies.
 --
--- Returns "accepted" or "declined".
-local function offerDownload(observation, promptText)
+-- Returns "accepted" or "declined". `progressLabel` (optional, e.g.
+-- " (Observation 5 of 23)") is appended to the title as-is.
+local function offerDownload(observation, promptText, progressLabel)
     local outcome = "declined"
 
     LrFunctionContext.callWithContext("INatOfferDownload", function(context)
@@ -457,7 +477,7 @@ local function offerDownload(observation, promptText)
         }
 
         local result = LrDialogs.presentModalDialog {
-            title = "Recover Missing Photo",
+            title = "Recover Missing Photo" .. (progressLabel or ""),
             contents = contents,
             actionVerb = "Download",
             cancelVerb = "Not Now",
@@ -498,8 +518,9 @@ end
 -- check already scattered through the rest of this run's processing
 -- picks it up with no other plumbing needed.
 --
--- Returns "ok" or "abort".
-local function showNoGoodCandidateNotice(observation, reason)
+-- Returns "ok" or "abort". `progressLabel` (optional, e.g.
+-- " (Observation 5 of 23)") is appended to the title as-is.
+local function showNoGoodCandidateNotice(observation, reason, progressLabel)
     local outcome = "ok"
 
     LrFunctionContext.callWithContext("INatNoGoodCandidate", function(context)
@@ -515,7 +536,7 @@ local function showNoGoodCandidateNotice(observation, reason)
         }
 
         local result = LrDialogs.presentModalDialog {
-            title = "No Good Candidate",
+            title = "No Good Candidate" .. (progressLabel or ""),
             contents = contents,
             actionVerb = "Continue",
             cancelVerb = "Abort Sync",
@@ -544,8 +565,18 @@ end
 -- for). A first-time link never reaches here -- its own dedicated review
 -- (confirmNewLink) already covers that moment.
 --
--- Returns "ok" or "skipAll".
-local function showFieldChangeNotice(observation, changes, allowSkipAll)
+-- The match this notice describes is already applied by the time this
+-- dialog shows (see the apply loop below), so unlike confirmNewLink/
+-- resolveClusterManually/showNoGoodCandidateNotice there's nothing here
+-- to gate -- "Cancel" used to be a no-op, identical to "OK". Repurposed
+-- as the Abort Sync button (2026-07-31, matching those other dialogs'
+-- convention) since all 3 button slots were already spoken for: aborting
+-- here only stops processing further observations, it can't and doesn't
+-- undo the change just shown.
+--
+-- Returns "ok", "skipAll", or "abort". `progressLabel` (optional, e.g.
+-- " (Observation 5 of 23)") is appended to the title as-is.
+local function showFieldChangeNotice(observation, changes, allowSkipAll, progressLabel)
     local outcome = "ok"
 
     LrFunctionContext.callWithContext("INatFieldChangeNotice", function(context)
@@ -565,9 +596,10 @@ local function showFieldChangeNotice(observation, changes, allowSkipAll)
         }
 
         local dialogArgs = {
-            title = "iNaturalist Data Changed",
+            title = "iNaturalist Data Changed" .. (progressLabel or ""),
             contents = contents,
             actionVerb = "OK",
+            cancelVerb = "Abort Sync",
         }
         if allowSkipAll then
             dialogArgs.otherVerb = "Skip All Remaining"
@@ -579,6 +611,8 @@ local function showFieldChangeNotice(observation, changes, allowSkipAll)
 
         if result == "other" then
             outcome = "skipAll"
+        elseif result == "cancel" then
+            outcome = "abort"
         end
     end)
 
@@ -855,6 +889,10 @@ local function formatSummary(counts, needsAttentionCount, reportPath, fullLogPat
         table.insert(parts, counts.fieldChangeNotices .. " already-linked observation" .. (counts.fieldChangeNotices == 1 and "" or "s")
             .. " had iNaturalist data change (quality grade, suggestion, or identification)")
     end
+    if counts.removedFromINat > 0 then
+        table.insert(parts, counts.removedFromINat .. " previously-pending observation" .. (counts.removedFromINat == 1 and "" or "s")
+            .. " no longer exist on iNaturalist (deleted or merged) -- cleared from the retry list")
+    end
 
     local message = #parts > 0 and table.concat(parts, "\n") or "Nothing to sync -- everything's already up to date."
 
@@ -920,10 +958,22 @@ function INatSyncRunner.run(options)
                 -- status section on the one dialog every sync already
                 -- shows, rather than a separate menu command nobody
                 -- reaches for day to day.
-                local lastSyncTime = INatSync.getLastSyncTime()
+                -- The query cursor (getLastSyncTime) is deliberately shifted
+                -- back by a trailing safety margin (see
+                -- SYNC_CURSOR_SAFETY_MARGIN_SECONDS) -- displaying that
+                -- here always undercounted by up to an hour (confirmed
+                -- live 2026-07-31 running syncs back-to-back). Use the
+                -- separate, unshifted completion time for this line.
+                -- Falls back to the old margin-shifted cursor (undoing the
+                -- shift) for installs that synced before this display fix
+                -- existed and so don't have lastSyncCompletedAt yet --
+                -- otherwise their very next run would wrongly claim "Never
+                -- synced before".
+                local lastSyncCompletedTime = INatSync.getLastSyncCompletedTime()
+                    or (INatSync.getLastSyncTime() and INatSync.getLastSyncTime() + SYNC_CURSOR_SAFETY_MARGIN_SECONDS)
                 local lastSyncLine
-                if lastSyncTime then
-                    lastSyncLine = "Last synced " .. describeElapsedTime(LrDate.currentTime() - lastSyncTime)
+                if lastSyncCompletedTime then
+                    lastSyncLine = "Last synced " .. describeElapsedTime(LrDate.currentTime() - lastSyncCompletedTime)
                 else
                     lastSyncLine = "Never synced before"
                 end
@@ -1054,6 +1104,8 @@ function INatSyncRunner.run(options)
         -- this run's deltas.
         local needsAttention = {}
 
+        local progressDone = false
+
         local runOk, runErr = LrTasks.pcall(function()
             -- Shows exactly what's being requested -- full history vs. a
             -- cutoff date -- for the whole pull phase (not just a fleeting
@@ -1077,8 +1129,45 @@ function INatSyncRunner.run(options)
                 applied = 0, linkedOnly = 0, repairedAncestry = 0, skippedDisagreement = 0, failed = 0,
                 unresolvedCollisions = 0, absorbedSiblings = 0, resolvedViaMergeDialog = 0, skippedNewLinkConfirmation = 0,
                 recoveredTotalLoss = 0, recoveredPartialLoss = 0, declinedDownload = 0, downloadFailed = 0, noGoodCandidate = 0,
-                fieldChangeNotices = 0,
+                fieldChangeNotices = 0, removedFromINat = 0,
             }
+
+            -- An id on the retry/mismatch list that iNat has nothing for
+            -- at all (deleted or merged away since it was flagged) would
+            -- otherwise stay "pending" forever -- nothing else ever clears
+            -- it off the list except a successful match, which can never
+            -- happen for an observation that no longer exists (confirmed
+            -- live 2026-07-31: a pair of duplicate observations the user
+            -- had since cleaned up on iNat stayed silently stuck, with no
+            -- trace anywhere, across several incremental runs). Cleared
+            -- here, once, with an actual note -- not left to just vanish
+            -- from the pending count with no explanation.
+            for _, id in ipairs(report.goneObservationIds or {}) do
+                INatSync.markRetryOutcome(id, true)
+                INatSync.markMismatchOutcome(id, false)
+                counts.removedFromINat = counts.removedFromINat + 1
+                logObservation({ id = id }, "removed_from_inat",
+                    "No longer found on iNaturalist (deleted or merged) -- cleared from the retry list")
+            end
+
+            -- Total distinct observations reviewed/applied this run --
+            -- used to append "(Observation N of Total)" to each
+            -- per-observation dialog's title, so a long run gives some
+            -- sense of progress through the batch (2026-07-31, requested
+            -- while working through a real 23-observation sync). Computed
+            -- once, upfront: noLocalMatchObservations and toResolveManually
+            -- are already finalized here; toApply grows later as
+            -- collisions resolve, but each of THOSE observations is
+            -- already counted via toResolveManually (exactly one entry
+            -- per observation, see pullAndMatch), so counting
+            -- report.toApply's own starting length avoids double-counting.
+            local totalObservationsThisRun =
+                #report.noLocalMatchObservations + #report.toResolveManually + #report.toApply
+            local observationProgressIndex = 0
+            local function nextProgressLabel()
+                observationProgressIndex = observationProgressIndex + 1
+                return string.format(" (Observation %d of %d)", observationProgressIndex, totalObservationsThisRun)
+            end
 
             -- Bucket 3/4: every observation with NO existing local match at
             -- all. `noLocalMatchUncertain[obs.id]` (see INatSync.pullAndMatch)
@@ -1100,10 +1189,11 @@ function INatSyncRunner.run(options)
                 if progressScope:isCanceled() then
                     logObservation(obs, "canceled_before_apply")
                 else
+                    local progressLabel = nextProgressLabel()
                     local reason = report.noLocalMatchReasons[obs.id]
                     if reason and report.noLocalMatchUncertain[obs.id] then
                         progressScope:setCaption("Reviewing: " .. tostring(obs.taxon and obs.taxon.name or obs.id))
-                        if showNoGoodCandidateNotice(obs, reason) == "abort" then
+                        if showNoGoodCandidateNotice(obs, reason, progressLabel) == "abort" then
                             progressScope:cancel()
                         end
                         INatSync.markRetryOutcome(obs.id, false)
@@ -1119,7 +1209,8 @@ function INatSyncRunner.run(options)
                     else
                         progressScope:setCaption("Reviewing: " .. tostring(obs.taxon and obs.taxon.name or obs.id))
                         local downloadOutcome = offerDownload(
-                            obs, "No local photo found at all for " .. describeObservation(obs) .. ". Download iNat's own copy(s)?"
+                            obs, "No local photo found at all for " .. describeObservation(obs) .. ". Download iNat's own copy(s)?",
+                            progressLabel
                         )
                         if downloadOutcome == "accepted" then
                             local recoverOk, recoverResult = LrTasks.pcall(INatRecovery.recoverTotalLoss, obs, username, destDir)
@@ -1171,10 +1262,84 @@ function INatSyncRunner.run(options)
                 table.insert(allMatches, match)
             end
 
+            -- Shared by all three "this observation never got resolved"
+            -- paths below (skipped/unreached in a normally-processed
+            -- cluster, every observation in a cluster reached only after
+            -- Abort Sync fired partway through, and every observation in a
+            -- cluster never reached at all because the run was already
+            -- canceled beforehand) -- each only differs in WHICH
+            -- observations and what reason text to use. Deliberately takes
+            -- an explicit observation list, not the cluster itself, since
+            -- the first case is a SUBSET of cluster.observations, not all
+            -- of it.
+            local function markUnresolvedCollision(observationsToMark, cluster, groupLabels, reasonPrefix)
+                for _, obs in ipairs(observationsToMark) do
+                    INatSync.markRetryOutcome(obs.id, false)
+                    local detail = reasonPrefix .. " -- candidate local photo(s) in this cluster: "
+                        .. table.concat(groupLabels, "; ")
+                    if cluster.claimedAwayReason then
+                        detail = detail .. " -- also already claimed this run: " .. cluster.claimedAwayReason
+                    end
+                    logObservation(obs, "unresolved_collision", detail)
+                    table.insert(needsAttention, {
+                        observationId = obs.id,
+                        url = "https://www.inaturalist.org/observations/" .. tostring(obs.id),
+                        category = "unresolved_collision",
+                        detail = detail,
+                        photoUrl = firstPhotoUrl(obs),
+                    })
+                end
+                -- Deliberately #observationsToMark, NOT (#cluster.groups -
+                -- #resolved) -- confirmed live 2026-07-30: a cluster can
+                -- have more candidate LOCAL GROUPS than colliding
+                -- OBSERVATIONS (an extra nearby photo that isn't actually
+                -- any of these iNat posts, entirely normal), which left the
+                -- group-based count positive even when every observation
+                -- the user was actually shown got resolved -- an
+                -- "unresolved" count with no corresponding log/report entry
+                -- at all, since only observations ever get logged. This
+                -- must always match what's actually logged above.
+                counts.unresolvedCollisions = counts.unresolvedCollisions + #observationsToMark
+            end
+
             if not progressScope:isCanceled() then
-                for _, cluster in ipairs(report.toResolveManually) do
-                    local resolved, unresolvedObservations, groupLabels = resolveClusterManually(cluster)
+                -- Tracks which local groups the user has already assigned
+                -- via the picker earlier in THIS SAME loop (keyed by the
+                -- group table itself) -- pullAndMatch computes every
+                -- cluster's candidate list in one pass, BEFORE any
+                -- interactive picking happens, so two separate
+                -- observations of the SAME species can be handed the SAME
+                -- overlapping candidate pool. Without this, picking a
+                -- photo for an earlier observation doesn't remove it from
+                -- a later, same-species observation's own dialog moments
+                -- later (confirmed live, 2026-07-31: a photo already
+                -- assigned to one observation was still offered as a
+                -- choice for a later one).
+                local groupsClaimedByPicker = {}
+
+                for clusterIndex, cluster in ipairs(report.toResolveManually) do
+                    local remainingGroups = {}
+                    for _, g in ipairs(cluster.groups) do
+                        if not groupsClaimedByPicker[g] then
+                            table.insert(remainingGroups, g)
+                        end
+                    end
+                    -- Diagnostic only: lets the "nothing left" case below
+                    -- say WHY, instead of implying a dialog was shown and
+                    -- skipped when none ever appeared.
+                    local candidatesAllClaimedElsewhere = #remainingGroups == 0 and #cluster.groups > 0
+                    cluster.groups = remainingGroups
+
+                    local resolved, unresolvedObservations, groupLabels, aborted =
+                        resolveClusterManually(cluster, nextProgressLabel())
                     for _, pair in ipairs(resolved) do
+                        -- Picking a specific candidate among several IS the
+                        -- confirmation -- the apply loop below must not ask
+                        -- again via confirmNewLink for a match that was just
+                        -- decided here (2026-07-31, real live complaint:
+                        -- confirming the same match twice in a row).
+                        pair.resolvedViaPicker = true
+                        groupsClaimedByPicker[pair.group] = true
                         table.insert(allMatches, pair)
                     end
                     -- Anything left unresolved (including explicit "Skip For
@@ -1182,62 +1347,39 @@ function INatSyncRunner.run(options)
                     -- next run regardless of the `updated_since` cursor --
                     -- see the doc comment on resolveClusterManually for why
                     -- this matters.
-                    for _, obs in ipairs(unresolvedObservations) do
-                        INatSync.markRetryOutcome(obs.id, false)
-                        local detail = "skipped in the match dialog -- candidate local photo(s) in this cluster: "
-                            .. table.concat(groupLabels, "; ")
-                        if cluster.claimedAwayReason then
-                            detail = detail .. " -- also already claimed this run: " .. cluster.claimedAwayReason
+                    markUnresolvedCollision(unresolvedObservations, cluster, groupLabels,
+                        candidatesAllClaimedElsewhere and "every candidate was already assigned to an earlier observation this run"
+                            or "skipped in the match dialog")
+
+                    if aborted then
+                        progressScope:cancel()
+                        -- "Abort Sync" fired partway through THIS cluster --
+                        -- every OTHER cluster after it in the list never got
+                        -- a chance to run at all, and needs the exact same
+                        -- retry-list treatment as the "canceled before
+                        -- manual resolution even started" branch below, or
+                        -- their observations would silently fall off the
+                        -- retry list just because the abort happened
+                        -- partway through, not at the very start.
+                        for i = clusterIndex + 1, #report.toResolveManually do
+                            local laterCluster = report.toResolveManually[i]
+                            markUnresolvedCollision(
+                                laterCluster.observations, laterCluster, describeCandidateGroups(laterCluster.groups),
+                                "run aborted mid-resolution"
+                            )
                         end
-                        logObservation(obs, "unresolved_collision", detail)
-                        table.insert(needsAttention, {
-                            observationId = obs.id,
-                            url = "https://www.inaturalist.org/observations/" .. tostring(obs.id),
-                            category = "unresolved_collision",
-                            detail = detail,
-                            photoUrl = firstPhotoUrl(obs),
-                        })
+                        break
                     end
-                    -- Deliberately #unresolvedObservations, NOT
-                    -- (#cluster.groups - #resolved) -- confirmed live
-                    -- 2026-07-30: a cluster can have more candidate LOCAL
-                    -- GROUPS than colliding OBSERVATIONS (an extra nearby
-                    -- photo that isn't actually any of these iNat posts,
-                    -- entirely normal), which left the group-based count
-                    -- positive even when every observation the user was
-                    -- actually shown got resolved -- an "unresolved" count
-                    -- with no corresponding log/report entry at all, since
-                    -- only observations ever get logged. This must always
-                    -- match what's actually logged above.
-                    counts.unresolvedCollisions = counts.unresolvedCollisions + #unresolvedObservations
                 end
             else
                 -- The whole run was canceled before manual resolution even
                 -- started -- every observation in every remaining cluster is
                 -- unresolved, and needs the same retry-list treatment.
                 for _, cluster in ipairs(report.toResolveManually) do
-                    local groupLabels = describeCandidateGroups(cluster.groups)
-                    for _, obs in ipairs(cluster.observations) do
-                        INatSync.markRetryOutcome(obs.id, false)
-                        local detail = "run canceled before manual resolution -- candidate local photo(s) in this cluster: "
-                            .. table.concat(groupLabels, "; ")
-                        if cluster.claimedAwayReason then
-                            detail = detail .. " -- also already claimed this run: " .. cluster.claimedAwayReason
-                        end
-                        logObservation(obs, "unresolved_collision", detail)
-                        table.insert(needsAttention, {
-                            observationId = obs.id,
-                            url = "https://www.inaturalist.org/observations/" .. tostring(obs.id),
-                            category = "unresolved_collision",
-                            detail = detail,
-                            photoUrl = firstPhotoUrl(obs),
-                        })
-                    end
-                    -- Same fix as the non-canceled branch above -- count
-                    -- what was actually logged (every observation in this
-                    -- cluster), not the candidate group count, which can
-                    -- differ.
-                    counts.unresolvedCollisions = counts.unresolvedCollisions + #cluster.observations
+                    markUnresolvedCollision(
+                        cluster.observations, cluster, describeCandidateGroups(cluster.groups),
+                        "run canceled before manual resolution"
+                    )
                 end
             end
 
@@ -1266,6 +1408,16 @@ function INatSyncRunner.run(options)
                 if progressScope:isCanceled() then
                     canceledDuringApply = true
                     for j = i, #allMatches do
+                        -- Already protected from being silently skipped
+                        -- forever by canceledDuringApply itself (below,
+                        -- prevents the sync cursor from advancing, so the
+                        -- next run naturally re-pulls and re-matches these
+                        -- regardless) -- but explicitly retry-listing here
+                        -- too matches the same belt-and-suspenders style
+                        -- already used at the other two Abort Sync points
+                        -- (mid-discovery), rather than relying on a single
+                        -- mechanism (2026-07-31, consistency fix).
+                        INatSync.markRetryOutcome(allMatches[j].observation.id, false)
                         logObservation(allMatches[j].observation, "canceled_before_apply")
                     end
                     break
@@ -1281,15 +1433,25 @@ function INatSyncRunner.run(options)
                 -- fast, or every regular Sync would turn back into a full
                 -- manual review. No bulk-accept escape hatch -- explicitly
                 -- not wanted; every first-time link gets its own
-                -- confirmation, every run.
+                -- confirmation, every run -- UNLESS it was already
+                -- confirmed moments ago via the collision picker
+                -- (resolvedViaPicker, see above) -- picking a specific
+                -- candidate among several already IS that confirmation;
+                -- asking again here was a real, confirmed-live redundancy
+                -- (2026-07-31).
+                local progressLabel = nextProgressLabel()
                 local shouldApply = true
-                if match.group.iNatObservationId == nil then
-                    local confirmOutcome = confirmNewLink(match)
-                    if confirmOutcome == "skipped" then
+                if match.group.iNatObservationId == nil and not match.resolvedViaPicker then
+                    local confirmOutcome = confirmNewLink(match, progressLabel)
+                    if confirmOutcome == "abort" then
+                        progressScope:cancel()
+                    end
+                    if confirmOutcome ~= "confirmed" then
                         shouldApply = false
                         counts.skippedNewLinkConfirmation = counts.skippedNewLinkConfirmation + 1
                         INatSync.markRetryOutcome(match.observation.id, false)
-                        logObservation(match.observation, "skipped_new_link_confirmation")
+                        logObservation(match.observation,
+                            confirmOutcome == "abort" and "aborted_new_link_confirmation" or "skipped_new_link_confirmation")
                     end
                 end
 
@@ -1315,9 +1477,11 @@ function INatSyncRunner.run(options)
                                 "Reviewing data change: " .. tostring(match.observation.taxon and match.observation.taxon.name or match.observation.id)
                             )
                             counts.fieldChangeNotices = counts.fieldChangeNotices + 1
-                            local noticeOutcome = showFieldChangeNotice(match.observation, result.changes, true)
+                            local noticeOutcome = showFieldChangeNotice(match.observation, result.changes, true, progressLabel)
                             if noticeOutcome == "skipAll" then
                                 skipAllRemainingFieldChangeNotices = true
+                            elseif noticeOutcome == "abort" then
+                                progressScope:cancel()
                             end
                         end
 
@@ -1374,7 +1538,7 @@ function INatSyncRunner.run(options)
                                         "iNat reports more photos than found locally for %s. Download the missing one(s)?",
                                         describeObservation(match.observation)
                                     )
-                                local downloadOutcome = offerDownload(match.observation, promptText)
+                                local downloadOutcome = offerDownload(match.observation, promptText, progressLabel)
                                 if downloadOutcome == "accepted" then
                                     local recoverOk, recoverResult = LrTasks.pcall(
                                         INatRecovery.recoverPartialLoss, match.group, match.observation, username, destDir
@@ -1447,6 +1611,7 @@ function INatSyncRunner.run(options)
             -- wasn't reached.
             if not progressScope:isCanceled() and not canceledDuringApply then
                 INatSync.setLastSyncTime(syncStartTime - SYNC_CURSOR_SAFETY_MARGIN_SECONDS)
+                INatSync.setLastSyncCompletedTime(syncStartTime)
             end
 
             local reportPath = writeNeedsAttentionReport(needsAttention)
@@ -1455,10 +1620,30 @@ function INatSyncRunner.run(options)
             end
             local syncType = forceFullPull and "Full Sync" or "Sync"
             local fullLogPath = writeFullSyncLog(runLog, { syncType = syncType, pullDebug = report.pullDebug })
+
+            -- Clear the progress HUD BEFORE showing the final summary, not
+            -- after -- previously this only happened once the modal summary
+            -- dialog below had already been closed, and the HUD was
+            -- confirmed live (2026-07-31, aborting partway through a
+            -- 64-observation run) to still be visible even after dismissing
+            -- that dialog. All real work for this run is finished by this
+            -- point regardless of how it ended (completed, or Abort Sync
+            -- fired earlier), so there's nothing left for the progress bar
+            -- to reflect.
+            progressScope:done()
+            progressDone = true
+
             LrDialogs.message("Sync from iNaturalist", formatSummary(counts, #needsAttention, reportPath, fullLogPath), "info")
         end)
 
-        progressScope:done()
+        -- Safety net for a genuine crash that occurred before the point
+        -- above was reached (see the comment on runOk/runErr) -- guarded so
+        -- a normal, successful run (which already called progressScope:done()
+        -- earlier, right before its own summary dialog) doesn't call it
+        -- a second time.
+        if not progressDone then
+            progressScope:done()
+        end
 
         if not runOk then
             LrDialogs.message(
