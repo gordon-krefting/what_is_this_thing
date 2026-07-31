@@ -3089,6 +3089,20 @@ whole class of order-dependent mis-claiming. Not yet designed or
 implemented; the user asked to chase the claim-trace bug first. Revisit
 once the trace log has captured a real occurrence.
 
+**Update, same day**: the log file never actually got written on the
+first live run -- `logClaim`'s `pcall` was silently swallowing a real
+error. Added an error-fallback write (a separate file directly under
+`$HOME`, bypassing the `Photos/local/WhatIsThisThing` subdirectory) to
+surface it, which turned out to be `"Yielding is not allowed within a C
+or metamethod call"` on every single call -- the exact same documented
+Lua 5.1/Lightroom failure class already known elsewhere in this codebase
+(plain `pcall` is a C-call boundary that can't yield; file I/O here does
+yield) -- just not yet learned in `INatSync.lua`, which never imported
+`LrTasks` before. Fixed by importing `LrTasks` and switching both `pcall`
+calls in `logClaim` to `LrTasks.pcall`. Real lesson for next time a
+diagnostic silently produces nothing in this codebase: check for this
+failure mode FIRST, before assuming the surrounding logic is wrong.
+
 Testing: full `lua5.4` syntax sweep plus all four mock suites
 (`mock_test_inatsync.lua`, `mock_test_inatsyncrunner.lua`,
 `mock_test_inatrecovery.lua`, `mock_test_mergeobservation.lua`) pass
