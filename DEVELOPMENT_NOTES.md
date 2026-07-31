@@ -2913,6 +2913,68 @@ otherwise, confirming this is a pure performance fix with no behavior
 change. Live verification: confirmed by the user against the real
 21,662-photo catalog -- noticeably faster, results correct.
 
+## Manual fixes (Set iNat Observation / Merge Observation) now clear the sync's retry/mismatch bookkeeping (2026-07-31)
+
+Live bug: the "Sync from iNaturalist" pre-flight dialog kept reporting "1
+observation still pending from a previous run" indefinitely, never
+clearing. Investigated with real data: pulled observations #386593145 and
+#386593148 directly from iNat's API (same species, same declared
+`time_observed_at`, from a burst of photos 5 seconds apart -- a genuine
+same-timestamp collision), then confirmed via direct SQLite query against
+the real catalog that `DSC_1799.NEF` and `DSC_1800.NEF` were ALREADY
+correctly, distinctly linked to their respective observations. The
+underlying data was fine -- the "pending" flag was stale.
+
+**Root cause**: `INatSync.markRetryOutcome`/`markMismatchOutcome` (the
+functions that clear `iNatPendingRetryIds`/`iNatPendingMismatchIds`) are
+only ever called from `INatSyncRunner.lua`'s own apply loop and
+`INatRecovery.lua` -- never from `SetINatObservation.lua`,
+`MergeObservation.lua`/`ObservationMerge.lua`, or `SplitObservation.lua`.
+The field pattern on `DSC_1799.NEF` (scientificName + a fresh observationId
++ iNatObservationId, all set together) matches exactly what
+`SetINatObservation.lua` writes -- meaning this collision most likely got
+fixed by hand via that tool, which correctly wrote the link but had no way
+to tell the sync's own bookkeeping the observation was resolved. It would
+have self-healed on the next sync run regardless (the observation stays on
+the retry list, gets force-included in the next pull regardless of the
+`updated_since` cursor, and gets matched via the fast path since it's
+already linked) -- but that's an extra, unnecessary "wasted" run just to
+notice its own fix.
+
+**Fix**: `SetINatObservation.lua` and `ObservationMerge.lua` (shared by
+`MergeObservation.lua` and the sync's own `MergeCandidatesDialog.lua`) now
+call `INatSync.markRetryOutcome(id, true)` and
+`INatSync.markMismatchOutcome(id, false)` right after successfully writing
+a link -- in `ObservationMerge.lua`, only when merging into an
+already-linked master (nothing to clear otherwise). `SplitObservation.lua`
+deliberately left untouched: it CLEARS `iNatObservationId` rather than
+setting one, so the old observation genuinely still needs the next sync to
+re-resolve it -- there's nothing to mark resolved yet.
+
+One easy-to-miss detail: `iNatObservationId` is always stored as a
+*string* (`tostring(observation.id)`, `INatSync.lua`/
+`SetINatObservation.lua`), but `markRetryOutcome`/`markMismatchOutcome`
+compare against the *numeric* ids used everywhere else in
+`INatSyncRunner.lua` (`match.observation.id`, `obs.id`) via plain `==` --
+passing the string through unconverted would silently add a
+never-matching duplicate entry instead of clearing the real one.
+`ObservationMerge.lua` converts via `tonumber()` before calling either
+function; `SetINatObservation.lua` already has the numeric id in hand
+(`parseObservationId` returns `tonumber(...)`), so no conversion needed
+there.
+
+Testing: extended `mock_test_mergeobservation.lua` with a `LrPrefs` stub
+(needed once `ObservationMerge.lua` started dofiling `INatSync.lua`) and a
+new Case 7, reproducing the live scenario -- pre-seeding both pending lists
+with the observation id, merging into an already-linked master, and
+asserting both lists end up empty. All other suites
+(`mock_test_inatsync.lua`, `mock_test_inatsyncrunner.lua`,
+`mock_test_inatrecovery.lua`) pass unchanged. `SetINatObservation.lua` has
+no existing mock harness (never had one before this change) -- verified
+via the full `lua5.4` syntax sweep and careful re-reading only, matching
+this project's established precedent for narrow, low-risk additions to
+files without prior test infrastructure.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --

@@ -3,6 +3,7 @@ local LrPathUtils = import 'LrPathUtils'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 
 local ObservationMerge = {}
 
@@ -60,6 +61,20 @@ function ObservationMerge.merge(master, otherPhotos)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", masterINatObservationUrl)
             end
         end)
+
+        -- Absorbing a missing/mismatched photo into an already-linked
+        -- observation by hand (this is exactly what the sync's own
+        -- mismatch picker, MergeCandidatesDialog.lua, does) resolves
+        -- whatever the sync flagged it for -- clear the retry/mismatch
+        -- bookkeeping here so it doesn't keep nagging on every future
+        -- run. iNatObservationId is stored as a string (see
+        -- INatSync.lua/SetINatObservation.lua); markRetryOutcome/
+        -- markMismatchOutcome key by the numeric id used everywhere else.
+        local numericId = tonumber(masterINatObservationId)
+        if numericId then
+            INatSync.markRetryOutcome(numericId, true)
+            INatSync.markMismatchOutcome(numericId, false)
+        end
     end
 
     return resolvedCandidate, orderedPhotos

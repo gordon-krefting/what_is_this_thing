@@ -8,6 +8,7 @@ local LrFunctionContext = import 'LrFunctionContext'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 
 -- Explicit override: point the selected photo(s) at a SPECIFIC iNat
 -- observation, chosen by the user, bypassing the sync's own automatic
@@ -165,6 +166,15 @@ LrTasks.startAsyncTask(function()
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", observationUrl)
         end
     end)
+
+    -- A manual override like this is exactly how an observation the sync
+    -- couldn't auto-resolve (an unresolved collision, a declined/failed
+    -- download, a "no good candidate" notice) usually gets fixed by hand
+    -- -- without this, it stays on the retry/mismatch lists forever, since
+    -- only a sync run itself ever clears them (see DEVELOPMENT_NOTES.md,
+    -- "pending observation note... doesn't clear up").
+    INatSync.markRetryOutcome(observationId, true)
+    INatSync.markMismatchOutcome(observationId, false)
 
     LrDialogs.message(
         "Set iNat Observation",
