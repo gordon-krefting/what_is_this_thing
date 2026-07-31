@@ -484,7 +484,24 @@ end
 -- expected to be rare now that legacy-observation matching is mostly
 -- caught up; revisit per-item-vs-aggregate notice style if that turns out
 -- wrong in practice.
+-- Purely informational -- there's no decision to make here (see the
+-- design note on bucket 4 in DEVELOPMENT_NOTES.md), so the only real
+-- choices are "acknowledge and keep going" or "stop the whole sync run
+-- now". Previously used LrDialogs' default OK/Cancel labels, but Cancel's
+-- result was never even read -- it did exactly the same thing as OK,
+-- which is exactly the confusing-buttons complaint that prompted this
+-- (2026-07-31). "Abort Sync" now genuinely stops the run, via
+-- progressScope:cancel() -- the SAME mechanism the sync's own progress
+-- bar Cancel button already uses (confirmed live via SDK docs: available
+-- since SDK 7.5, well within what this plugin's actual host, Lightroom
+-- Classic 13.3.1, supports) -- so every existing progressScope:isCanceled()
+-- check already scattered through the rest of this run's processing
+-- picks it up with no other plumbing needed.
+--
+-- Returns "ok" or "abort".
 local function showNoGoodCandidateNotice(observation, reason)
+    local outcome = "ok"
+
     LrFunctionContext.callWithContext("INatNoGoodCandidate", function(context)
         local f = LrView.osFactory()
         local inatThumbnail, inatThumbnailTempPath = buildINatThumbnail(f, observation)
@@ -497,14 +514,21 @@ local function showNoGoodCandidateNotice(observation, reason)
             f:static_text { title = "Flagged for retry -- see the Needs Attention report for details." },
         }
 
-        LrDialogs.presentModalDialog {
+        local result = LrDialogs.presentModalDialog {
             title = "No Good Candidate",
             contents = contents,
-            actionVerb = "OK",
+            actionVerb = "Continue",
+            cancelVerb = "Abort Sync",
         }
+
+        if result == "cancel" then
+            outcome = "abort"
+        end
 
         cleanupINatThumbnail(inatThumbnailTempPath)
     end)
+
+    return outcome
 end
 
 -- Purely informational -- shown after an ALREADY-linked observation's
@@ -1079,7 +1103,9 @@ function INatSyncRunner.run(options)
                     local reason = report.noLocalMatchReasons[obs.id]
                     if reason and report.noLocalMatchUncertain[obs.id] then
                         progressScope:setCaption("Reviewing: " .. tostring(obs.taxon and obs.taxon.name or obs.id))
-                        showNoGoodCandidateNotice(obs, reason)
+                        if showNoGoodCandidateNotice(obs, reason) == "abort" then
+                            progressScope:cancel()
+                        end
                         INatSync.markRetryOutcome(obs.id, false)
                         counts.noGoodCandidate = counts.noGoodCandidate + 1
                         logObservation(obs, "no_good_candidate", reason)

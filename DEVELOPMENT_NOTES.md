@@ -3097,6 +3097,42 @@ unchanged -- `logClaim` is pcall-wrapped and each test's
 path, confirmed not to write into the real
 `~/Photos/local/WhatIsThisThing/` directory.
 
+## "No Good Candidate" notice: clear button labels, and a real Abort Sync (2026-07-31)
+
+The user flagged real confusion mid-run: `showNoGoodCandidateNotice`
+(bucket 4's uncertain-match dialog) used LrDialogs' default OK/Cancel
+labels, but Cancel's return value was never even read -- it did exactly
+the same thing as OK (silently fell through to the same `markRetryOutcome`
+call either way). Meanwhile, there was no way to stop the whole sync run
+from this dialog at all short of the sync's own progress-bar Cancel
+button, which the user didn't think to reach for mid-dialog.
+
+**Fix**: `actionVerb = "Continue"`, `cancelVerb = "Abort Sync"` -- and
+Abort Sync now genuinely stops the run via `progressScope:cancel()`,
+confirmed via SDK docs to be a real method (available since SDK 7.5, well
+within what this plugin's actual host, Lightroom Classic 13.3.1, supports)
+that does exactly what the built-in progress-bar Cancel button does --
+every `progressScope:isCanceled()` check already scattered through the
+rest of this run's processing (apply loop, manual-resolution loop, closing
+summary) picks it up automatically, no other plumbing needed.
+`showNoGoodCandidateNotice` now returns `"ok"`/`"abort"`; the caller calls
+`progressScope:cancel()` on `"abort"`.
+
+Testing: `mock_test_inatsyncrunner.lua`'s `LrProgressScope` stub was
+previously stateless (`isCanceled()` hardcoded to always return `false`,
+since nothing had ever needed to simulate a mid-run cancel) -- made it
+stateful (`cancel()` sets a flag, `isCanceled()` reads it) and added Case
+6b: two bucket-4 observations queued, script the first's dialog to return
+`"cancel"`, assert the SECOND never gets its own dialog at all (proving
+the abort genuinely stops the run, not just this one notice). All other
+cases pass unchanged.
+
+Note: `showFieldChangeNotice` (the other purely-informational per-
+observation dialog, "iNaturalist Data Changed") has the same shape --
+default Cancel label, return value not distinguished from OK -- but the
+user's complaint was specifically about the no-good-candidate notice;
+left as-is for now, revisit if it comes up.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
