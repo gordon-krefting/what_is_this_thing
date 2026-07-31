@@ -10,6 +10,11 @@ local LrDialogs = import 'LrDialogs'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 
+-- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
+-- as a plain string (unlike get/setPropertyForPlugin, which also accept
+-- the _PLUGIN object) -- must match Info.lua's LrToolkitIdentifier exactly.
+local TOOLKIT_ID = "org.krefting.whatisthisthing"
+
 -- How close two capture-time values need to be to count as "the same
 -- moment" for matching a local photo to an iNat observation -- tiered,
 -- not a single blanket number, because widening the search for EVERY
@@ -355,8 +360,37 @@ local function buildLocalIndex(catalog)
     local photosByFilename = {}
     local ambiguousFilenames = {}
 
+    -- catalog:findPhotos with a custom-field searchDesc was confirmed
+    -- non-functional in this environment across 8 tried syntax variants
+    -- (see DEVELOPMENT_NOTES.md); findPhotosWithProperty, already relied
+    -- on live elsewhere (SetCultivar.lua, EditTaxonInfo.lua), instead
+    -- gives the set of photos that have ever been through this plugin's
+    -- identify flow directly, without a per-photo property read. Used
+    -- here to skip the 4 getPropertyForPlugin calls below (scientificName,
+    -- commonName, taxonRank, iNatObservationId) for the vast majority of
+    -- a real catalog (~20k of ~21.7k photos, confirmed live) that were
+    -- never tagged at all -- these were the dominant cost of the ~50s
+    -- delay before a sync's first dialog, confirmed live against a real
+    -- catalog and unrelated to how many observations actually changed.
+    --
+    -- Checks every field this function actually reads below, independently
+    -- -- not just observationId -- since they aren't always all written
+    -- together in every real code path (e.g. INatSync.applyMatch's
+    -- "skippedDisagreement" branch can set iNatObservationId alone, with
+    -- no observationId, on a group matched purely by time+filename and
+    -- never independently identified). Each findPhotosWithProperty call
+    -- replaces thousands of individual property reads with one filtered
+    -- list, so checking all 5 fields here is still far cheaper than the
+    -- per-photo reads it lets the loop below skip.
+    local isTagged = {}
+    for _, fieldId in ipairs({ "observationId", "iNatObservationId", "scientificName", "commonName", "taxonRank" }) do
+        for _, photo in ipairs(catalog:findPhotosWithProperty(TOOLKIT_ID, fieldId)) do
+            isTagged[photo] = true
+        end
+    end
+
     for _, photo in ipairs(catalog:getAllPhotos()) do
-        local localId = photo:getPropertyForPlugin(_PLUGIN, "observationId")
+        local localId = isTagged[photo] and photo:getPropertyForPlugin(_PLUGIN, "observationId") or nil
         local group
         if localId then
             group = byLocalObservationId[localId]
@@ -388,22 +422,30 @@ local function buildLocalIndex(catalog)
     local byINatId = {}
     for _, group in ipairs(groups) do
         local earliest = nil
+        -- Every photo in a tagged group shares one localId (by construction
+        -- above -- an untagged photo always starts its own singleton group),
+        -- so checking just the first photo reliably tells whether ANY of
+        -- this group's custom fields could possibly be set, without reading
+        -- them on every photo to find out.
+        local tagged = isTagged[group.photos[1]]
         for _, photo in ipairs(group.photos) do
             local t = photo:getRawMetadata("dateTimeOriginal")
             if t and (not earliest or t < earliest) then
                 earliest = t
             end
-            if not group.scientificName then
-                group.scientificName = photo:getPropertyForPlugin(_PLUGIN, "scientificName")
-            end
-            if not group.commonName then
-                group.commonName = photo:getPropertyForPlugin(_PLUGIN, "commonName")
-            end
-            if not group.rank then
-                group.rank = photo:getPropertyForPlugin(_PLUGIN, "taxonRank")
-            end
-            if not group.iNatObservationId then
-                group.iNatObservationId = photo:getPropertyForPlugin(_PLUGIN, "iNatObservationId")
+            if tagged then
+                if not group.scientificName then
+                    group.scientificName = photo:getPropertyForPlugin(_PLUGIN, "scientificName")
+                end
+                if not group.commonName then
+                    group.commonName = photo:getPropertyForPlugin(_PLUGIN, "commonName")
+                end
+                if not group.rank then
+                    group.rank = photo:getPropertyForPlugin(_PLUGIN, "taxonRank")
+                end
+                if not group.iNatObservationId then
+                    group.iNatObservationId = photo:getPropertyForPlugin(_PLUGIN, "iNatObservationId")
+                end
             end
         end
         group.time = earliest

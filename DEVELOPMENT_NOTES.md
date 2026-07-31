@@ -2848,6 +2848,71 @@ missing mock stubs (`f:catalog_photo`, needed by `buildCandidateColumn`)
 that had simply never been exercised by this test file before -- added
 rather than worked around.
 
+## Fixed the ~50s pre-dialog sync delay: `buildLocalIndex` no longer reads custom fields on every untagged photo (2026-07-30)
+
+Live testing found a real sync run with only 3 changed observations still
+took ~50 seconds before the first dialog appeared. Confirmed via SQLite
+against the real catalog: 21,662 total photos, only 11,423 custom-field
+rows for this plugin -- and `buildLocalIndex` (`INatSync.lua`) does a full
+`catalog:getAllPhotos()` scan doing 4 `getPropertyForPlugin` reads per
+photo (`scientificName`, `commonName`, `taxonRank`, `iNatObservationId`,
+plus a 5th for `observationId` to decide grouping) regardless of how many
+observations actually changed -- a fixed ~100K-call cost every run.
+
+The user pushed back on treating a full scan as unavoidable ("Are you
+implying the SDK doesn't have a method to query by custom metadata
+field?"), which was the right challenge. `catalog:findPhotos` with a
+custom-field `searchDesc` was tried first (per the SDK reference and
+several third-party examples), but 8 reasonable syntax variants (parens
+around the toolkit id, the literal `_PLUGIN` token, single/double quotes,
+`==` and `notEmpty` operators) all returned zero results against a photo
+directly confirmed (via SQLite) to have the field populated -- a genuine
+dead end, not worth continuing to guess at blind.
+
+The user's own idea broke the impasse: they built a Smart Collection
+("CustomTest") in the Library UI filtered on "iNat Observation ID is not
+empty" -- since Smart Collections use the exact same search-descriptor
+mechanism as `findPhotos`, its `collection:getSearchDescription()`
+returns Lightroom's own, actually-working criteria string verbatim. That
+confirmed the correct (untried) form is a plain dotted path with no
+parens or quoting: `sdktext:org.krefting.whatisthisthing.iNatObservationId`
+with `operation = "notEmpty"`.
+
+That confirmed syntax turned out not to be needed for the actual fix,
+though -- `catalog:findPhotosWithProperty(toolkitId, fieldId)` was already
+in live use elsewhere in this plugin (`SetCultivar.lua`, `EditTaxonInfo.lua`)
+and does exactly what's needed here: return every photo that has a given
+custom field set, without any per-photo read. `buildLocalIndex` now calls
+it once per relevant field (`observationId`, `iNatObservationId`,
+`scientificName`, `commonName`, `taxonRank`) to build an `isTagged` set
+up front, then skips all 5 `getPropertyForPlugin` calls entirely for any
+photo not in that set -- correctly the vast majority of a real catalog
+(~10K of ~21.7K photos, matching the SQLite count above).
+
+Checking all 5 fields independently (not just `observationId`) mattered:
+`scientificName`/`commonName`/`taxonRank` are only ever written by
+`KeywordWriter.applyIdentification`, which always sets `observationId` in
+the same transaction, so `observationId` alone would cover those three --
+but `INatSync.applyMatch`'s "skippedDisagreement"/fast-path branches can
+set `iNatObservationId` alone, with no `observationId`, on a group matched
+purely by time+filename and never independently identified. Missing this
+case was caught by the existing mock suite itself: an early version of
+the fix (checking `observationId` only, then `observationId` OR
+`iNatObservationId`) broke `mock_test_inatsync.lua` Case 1 and then Case 2
+in turn, each surfacing a real fixture with a different subset of the 5
+fields set independently of the others.
+
+Testing: extended `mock_test_inatsync.lua`, `mock_test_inatsyncrunner.lua`,
+and `mock_test_inatrecovery.lua`'s shared fake-catalog pattern with a
+`findPhotosWithProperty` stub (any photo whose `props[fieldId] ~= nil`),
+matching the real SDK method's semantics observed live via a throwaway
+diagnostic (`ProbeSmartCollection.lua`, added temporarily then removed
+once the working syntax was confirmed, per this project's established
+throwaway-diagnostic pattern). All three existing suites pass unchanged
+otherwise, confirming this is a pure performance fix with no behavior
+change. Live verification: confirmed by the user against the real
+21,662-photo catalog -- noticeably faster, results correct.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
