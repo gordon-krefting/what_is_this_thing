@@ -6,6 +6,7 @@ local LrView = import 'LrView'
 local LrBinding = import 'LrBinding'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
+local LrTasks = import 'LrTasks'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
@@ -335,11 +336,18 @@ end
 -- observation" report (confirmed live twice now, both cases NOT
 -- reproducible from a clean-slate offline repro against the same
 -- observations -- see DEVELOPMENT_NOTES.md) can be traced from an actual
--- live run instead of reconstructed after the fact. Silently no-ops if
--- the directory doesn't exist rather than risk breaking a real sync over
--- a debug log. Remove once the mechanism behind this is confirmed.
+-- live run instead of reconstructed after the fact. Remove once the
+-- mechanism behind this is confirmed.
+--
+-- MUST be LrTasks.pcall, not plain pcall -- plain pcall is a C-call
+-- boundary that can't yield in Lightroom's Lua 5.1, and file I/O here
+-- does yield. First version used plain pcall and silently produced
+-- "Yielding is not allowed within a C or metamethod call" on every
+-- single call (confirmed live, 2026-07-31, via the error-fallback path
+-- below) -- the same documented failure class as INatSyncRunner.lua's
+-- own top-level run wrapper, just not yet learned in this file.
 local function logClaim(mechanism, group, observation)
-    local ok, err = pcall(function()
+    local ok, err = LrTasks.pcall(function()
         local home = LrPathUtils.getStandardFilePath("home")
         local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
         dir = LrPathUtils.child(dir, "WhatIsThisThing")
@@ -370,7 +378,7 @@ local function logClaim(mechanism, group, observation)
     -- call already proven to work elsewhere in this file, so a real error
     -- message surfaces somewhere instead of vanishing a second time.
     if not ok then
-        pcall(function()
+        LrTasks.pcall(function()
             local home = LrPathUtils.getStandardFilePath("home")
             local f = io.open(LrPathUtils.child(home, "inat-claim-trace-error.txt"), "a")
             if f then
