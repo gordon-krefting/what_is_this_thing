@@ -5,30 +5,117 @@ local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
 local LrPathUtils = import 'LrPathUtils'
 local LrPrefs = import 'LrPrefs'
+local LrHttp = import 'LrHttp'
+local LrTasks = import 'LrTasks'
 
 local HomeLocation = dofile(LrPathUtils.child(_PLUGIN.path, "HomeLocation.lua"))
+local JSON = dofile(LrPathUtils.child(_PLUGIN.path, "JSON.lua"))
 
 local GpsPrompt = {}
 
--- Remembers the last hand-typed coordinates (and their approximate-location
--- checkbox state) across invocations, so a run of photos from the same
--- outing/location doesn't require retyping the same coordinates every time
--- -- offered as its own "Use Most Recent" button, distinct from the fixed
--- "Use Home" one. Deliberately NOT updated when "Use Home" is chosen (that
--- path already has its own dedicated button) or when nothing is submitted.
+-- Nominatim (OpenStreetMap) reverse geocoding for the "Use Most Recent"
+-- button's label -- raw coordinates alone don't carry much sense of place,
+-- confirmed as a real live gap (2026-08-01). A descriptive User-Agent is
+-- required by Nominatim's usage policy, not optional.
+local NOMINATIM_REVERSE_URL = "https://nominatim.openstreetmap.org/reverse"
+local NOMINATIM_USER_AGENT = "WhatIsThisThing-LightroomPlugin/0.1 (org.krefting.whatisthisthing)"
+
+-- zoom=14 empirically (live-tested against real coordinates during
+-- planning, several very different regions -- rural Chilean Patagonia,
+-- Yellowstone, Yosemite) lands on the most specific NAMED node Nominatim
+-- has near the point -- often a genuinely evocative one ("Upper Geyser
+-- Basin", "Yosemite Lodge", "Torres del Paine") -- without going so fine
+-- that it resolves to a bare trail/road name instead (confirmed live:
+-- zoom=18 on a point deep in Yosemite returned "Half Dome Trail", not
+-- anything about Half Dome itself). Not a hard guarantee for arbitrary
+-- coordinates, just the best single fixed zoom level found in testing.
+local NOMINATIM_ZOOM = 14
+
+-- `address` keys that represent a genuinely notable, non-administrative
+-- feature (park, natural landmark, protected area) when Nominatim's
+-- reverse lookup happens to have one tagged nearby -- checked in priority
+-- order. Administrative locality keys (city/town/etc., checked separately
+-- below as the fallback) are deliberately excluded here even though they
+-- often turn out just as evocative in practice (e.g. a Chilean commune
+-- literally named "Torres del Paine") -- that's exactly what the locality
+-- fallback already covers.
+local NAMED_FEATURE_ADDRESS_KEYS = {
+    "natural", "national_park", "protected_area", "leisure", "tourism", "water", "peak", "mountain_range", "attraction",
+}
+local LOCALITY_ADDRESS_KEYS = {
+    "neighbourhood", "hamlet", "suburb", "village", "town", "city", "municipality", "county",
+}
+
+-- Short "<named feature or locality>, <country>" label for a coordinate,
+-- or nil if the request failed or Nominatim had nothing usable at all
+-- (e.g. open ocean). Never raises -- this is a nice-to-have label, not
+-- something that should ever block getting coordinates onto a photo.
+local function reverseGeocodeLabel(lat, lng)
+    local url = string.format(
+        "%s?format=jsonv2&lat=%s&lon=%s&zoom=%d&addressdetails=1",
+        NOMINATIM_REVERSE_URL, tostring(lat), tostring(lng), NOMINATIM_ZOOM
+    )
+
+    local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url, {
+        { field = "User-Agent", value = NOMINATIM_USER_AGENT },
+    })
+    if not ok or not hdrs or hdrs.status ~= 200 then
+        return nil
+    end
+
+    local decodeOk, decoded = pcall(JSON.decode, response)
+    if not decodeOk or not decoded or not decoded.address then
+        return nil
+    end
+
+    local address = decoded.address
+    local place = nil
+    for _, key in ipairs(NAMED_FEATURE_ADDRESS_KEYS) do
+        if address[key] then
+            place = address[key]
+            break
+        end
+    end
+    if not place then
+        for _, key in ipairs(LOCALITY_ADDRESS_KEYS) do
+            if address[key] then
+                place = address[key]
+                break
+            end
+        end
+    end
+
+    if place and address.country then
+        return place .. ", " .. address.country
+    end
+    return place or address.country
+end
+
+-- Remembers the last hand-typed coordinates (their approximate-location
+-- checkbox state, and a reverse-geocoded place label) across invocations,
+-- so a run of photos from the same outing/location doesn't require
+-- retyping the same coordinates every time -- offered as its own "Use Most
+-- Recent" button, distinct from the fixed "Use Home" one. Deliberately NOT
+-- updated when "Use Home" is chosen (that path already has its own
+-- dedicated button) or when nothing is submitted.
 local function getRecentEntry()
     local prefs = LrPrefs.prefsForPlugin()
     if prefs.recentLat and prefs.recentLng then
-        return prefs.recentLat, prefs.recentLng, prefs.recentApproximate
+        return prefs.recentLat, prefs.recentLng, prefs.recentApproximate, prefs.recentPlaceName
     end
     return nil
 end
 
+-- Reverse-geocodes once, here, at the moment new coordinates are actually
+-- submitted -- not on every dialog open -- so showing the "Use Most
+-- Recent" button never costs a network round trip, only typing in a new
+-- location does.
 local function storeRecentEntry(lat, lng, isApproximate)
     local prefs = LrPrefs.prefsForPlugin()
     prefs.recentLat = lat
     prefs.recentLng = lng
     prefs.recentApproximate = isApproximate
+    prefs.recentPlaceName = reverseGeocodeLabel(lat, lng)
 end
 
 -- Smart/curly quotes -> straight quotes, so DMS input copied from
@@ -110,7 +197,7 @@ end
 -- flag, and not a per-instance judgment call the way typed coordinates are).
 function GpsPrompt.choose(promptText)
     local errorText = nil
-    local recentLat, recentLng, recentApproximate = getRecentEntry()
+    local recentLat, recentLng, recentApproximate, recentPlaceName = getRecentEntry()
 
     while true do
         local resultLat, resultLng, resultApproximate, canceled, parseFailed
@@ -143,6 +230,9 @@ function GpsPrompt.choose(promptText)
             if recentLat and recentLng then
                 local recentButton
                 local label = string.format("Use Most Recent (%.4f, %.4f)", recentLat, recentLng)
+                if recentPlaceName then
+                    label = label .. " -- " .. recentPlaceName
+                end
                 if recentApproximate then
                     label = label .. " [approx]"
                 end
