@@ -10,6 +10,7 @@ local LrTasks = import 'LrTasks'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 
 -- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
 -- as a plain string (unlike get/setPropertyForPlugin, which also accept
@@ -1021,6 +1022,19 @@ function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByF
             photo:setPropertyForPlugin(_PLUGIN, "iNatQualityGrade", observation.quality_grade)
             photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", suggestedId)
         end
+        -- Keeps the color label current every time sync touches a group --
+        -- covers plain quality-grade changes (e.g. Needs ID -> Research
+        -- Grade) that never go through KeywordWriter.applyIdentification
+        -- at all, not just first-time links. See ColorCode.lua. Both
+        -- fields passed explicitly (just written above, in THIS same
+        -- transaction) -- confirmed live 2026-08-02: reading them back via
+        -- getPropertyForPlugin here returned the STALE pre-sync grade, so
+        -- a photo that just became Research Grade came out blue instead
+        -- of purple.
+        ColorCode.applyToPhotos(photos, {
+            iNatObservationId = tostring(observation.id),
+            iNatQualityGrade = observation.quality_grade,
+        })
     end)
 
     -- Compare base filenames (extension stripped), not exact strings --

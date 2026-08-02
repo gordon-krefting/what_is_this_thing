@@ -4,6 +4,7 @@ local LrTasks = import 'LrTasks'
 local LrPathUtils = import 'LrPathUtils'
 
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 
 -- Splits each selected photo into its OWN separate observation -- gives
 -- every selected photo a fresh, distinct Observation ID, breaking it apart
@@ -35,6 +36,19 @@ LrTasks.startAsyncTask(function()
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", nil)
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", nil)
         end
+        -- The color label (if any) reflected the OLD, now-broken link --
+        -- recompute now that iNatObservationId is cleared, so a
+        -- previously purple/blue photo correctly drops to green (still
+        -- identified locally, just no longer linked) rather than keeping
+        -- a stale color that no longer means anything. ColorCode.CLEARED
+        -- (not plain nil) signals "just explicitly cleared in THIS
+        -- transaction" -- confirmed live 2026-08-02 that reading a
+        -- just-written value back here isn't reliable. observationId is
+        -- read live (safe even though a fresh UUID was also just written
+        -- above -- every photo reaching this command already had SOME
+        -- non-nil observationId before the split, so the presence check
+        -- this relies on gives the same true/false answer either way).
+        ColorCode.applyToPhotos(photos, { iNatObservationId = ColorCode.CLEARED })
     end)
 
     LrDialogs.message(

@@ -3,6 +3,7 @@ local LrPathUtils = import 'LrPathUtils'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local TaxonStore = dofile(LrPathUtils.child(_PLUGIN.path, "TaxonStore.lua"))
+local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 
 local KeywordWriter = {}
 
@@ -297,6 +298,17 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
                 end
             end
         end
+
+        -- Keeps the color label current the moment a photo is identified
+        -- (or re-identified) -- see ColorCode.lua. observationId passed
+        -- explicitly (just written above, in THIS same transaction --
+        -- confirmed live 2026-08-02 that reading it back here isn't
+        -- reliable); iNatObservationId/iNatQualityGrade are read live,
+        -- correctly, since this function doesn't touch either -- a
+        -- re-identification of an already-linked photo recomputes from
+        -- its still-current values, so it correctly stays purple/blue
+        -- rather than wrongly flipping to green.
+        ColorCode.applyToPhotos(photos, { observationId = observationId })
     end)
 end
 

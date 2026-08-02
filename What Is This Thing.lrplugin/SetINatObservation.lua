@@ -9,6 +9,7 @@ local LrFunctionContext = import 'LrFunctionContext'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
+local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 
 -- Explicit override: point the selected photo(s) at a SPECIFIC iNat
 -- observation, chosen by the user, bypassing the sync's own automatic
@@ -165,6 +166,16 @@ LrTasks.startAsyncTask(function()
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", tostring(observationId))
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", observationUrl)
         end
+        -- Recomputes the color label now that iNatObservationId is
+        -- actually set -- applyIdentification's own color-code call above
+        -- already ran for these photos, but at that point none of them
+        -- were linked yet, so it colored them green; left alone, that
+        -- would stay stale/wrong once they're linked here. Passed
+        -- explicitly (just written above, in THIS same transaction --
+        -- confirmed live 2026-08-02 that reading it back here isn't
+        -- reliable); iNatQualityGrade is read live since it isn't written
+        -- here at all.
+        ColorCode.applyToPhotos(photos, { iNatObservationId = tostring(observationId) })
     end)
 
     -- A manual override like this is exactly how an observation the sync

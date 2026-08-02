@@ -4,6 +4,7 @@ local LrPathUtils = import 'LrPathUtils'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
+local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 
 local ObservationMerge = {}
 
@@ -60,6 +61,16 @@ function ObservationMerge.merge(master, otherPhotos)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", masterINatObservationId)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", masterINatObservationUrl)
             end
+            -- Recomputes the color label now that iNatObservationId is
+            -- actually set -- applyIdentification's own color-code call
+            -- above already ran for these same photos, but at that point
+            -- none of them were linked yet, so it colored them green; left
+            -- alone, that would stay stale/wrong once they're linked here.
+            -- iNatObservationId passed explicitly (just written above, in
+            -- THIS same transaction -- confirmed live 2026-08-02 that
+            -- reading it back here isn't reliable); iNatQualityGrade is
+            -- read live per photo since it isn't written here at all.
+            ColorCode.applyToPhotos(orderedPhotos, { iNatObservationId = masterINatObservationId })
         end)
 
         -- Absorbing a missing/mismatched photo into an already-linked

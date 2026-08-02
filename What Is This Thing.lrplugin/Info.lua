@@ -49,8 +49,16 @@ return {
             file = "SyncFromINaturalist.lua",
         },
         {
+            title = "Color Code Identifications",
+            file = "ColorCodeIdentifications.lua",
+        },
+        {
             title = "Show Observation Filenames (one-off)",
             file = "ShowObservationFilenames.lua",
+        },
+        {
+            title = "Show Photo Properties (one-off)",
+            file = "ShowPhotoProperties.lua",
         },
     },
 
