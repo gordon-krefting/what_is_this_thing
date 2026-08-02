@@ -41,32 +41,58 @@ return {
                 { value = "species", title = "Species" },
                 { value = "subspecies", title = "Subspecies" },
                 { value = "variety", title = "Variety" },
+                { value = "form", title = "Form" },
+                { value = "infrahybrid", title = "Infrahybrid" },
+                { value = "hybrid", title = "Hybrid" },
+                { value = "complex", title = "Complex" },
+                { value = "subsection", title = "Subsection" },
+                { value = "section", title = "Section" },
+                { value = "subgenus", title = "Subgenus" },
                 { value = "genus", title = "Genus" },
+                { value = "genushybrid", title = "Genus Hybrid" },
+                { value = "subtribe", title = "Subtribe" },
+                { value = "tribe", title = "Tribe" },
+                { value = "supertribe", title = "Supertribe" },
                 { value = "subfamily", title = "Subfamily" },
                 { value = "family", title = "Family" },
+                { value = "epifamily", title = "Epifamily" },
                 { value = "superfamily", title = "Superfamily" },
-                { value = "tribe", title = "Tribe" },
+                { value = "zoosubsection", title = "Zoosubsection" },
+                { value = "zoosection", title = "Zoosection" },
+                { value = "parvorder", title = "Parvorder" },
                 { value = "infraorder", title = "Infraorder" },
                 { value = "suborder", title = "Suborder" },
                 { value = "order", title = "Order" },
+                { value = "superorder", title = "Superorder" },
+                { value = "subterclass", title = "Subterclass" },
+                { value = "infraclass", title = "Infraclass" },
                 { value = "subclass", title = "Subclass" },
                 { value = "class", title = "Class" },
+                { value = "superclass", title = "Superclass" },
                 { value = "subphylum", title = "Subphylum" },
                 { value = "phylum", title = "Phylum" },
                 { value = "kingdom", title = "Kingdom" },
-                { value = "hybrid", title = "Hybrid" },
                 -- Common_ancestor/lowest-common-ancestor results aren't
                 -- filtered through MAJOR_RANKS the way the normal ancestry
                 -- chain is, so they can legitimately land on any real iNat
-                -- rank, including intermediate ones -- this list is every
-                -- rank confirmed against real API responses this session
-                -- (e.g. Harmonia axyridis's full ancestor chain). Found the
-                -- hard way that a value outside the declared list shows as
-                -- blank in the Metadata panel's enum popup even with
-                -- allowPluginToSetOtherValues set -- that flag apparently
-                -- only prevents a write-time error, it doesn't give the
-                -- popup a way to display an undeclared value. Kept as a
-                -- safety net for anything even more exotic (e.g. "complex").
+                -- rank, including intermediate ones. This is now the FULL
+                -- set iNaturalist itself supports -- pulled directly from
+                -- Taxon::RANK_LEVELS in their own source
+                -- (github.com/inaturalist/inaturalist, app/models/taxon.rb),
+                -- not just whatever had been confirmed against real API
+                -- responses so far (2026-08-02, prompted by a real photo
+                -- identified as a subtribe, which wasn't in the old,
+                -- narrower list). Deliberately excludes "stateofmatter"
+                -- (rank_level 100, the root of the whole tree, e.g. "Life")
+                -- -- iNaturalist's own VISIBLE_RANKS constant excludes it
+                -- too, and no real photo identification would ever
+                -- legitimately land there. Found the hard way that a value
+                -- outside the declared list shows as blank in the Metadata
+                -- panel's enum popup even with allowPluginToSetOtherValues
+                -- set -- that flag apparently only prevents a write-time
+                -- error, it doesn't give the popup a way to display an
+                -- undeclared value. Kept as a safety net regardless, in
+                -- case iNaturalist adds another rank in the future.
                 allowPluginToSetOtherValues = true,
             },
         },
