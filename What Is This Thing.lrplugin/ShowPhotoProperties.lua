@@ -28,6 +28,8 @@ LrTasks.startAsyncTask(function()
         table.insert(lines, "  iNatQualityGrade: " .. tostring(photo:getPropertyForPlugin(_PLUGIN, "iNatQualityGrade")))
         table.insert(lines, "  observationId: " .. tostring(photo:getPropertyForPlugin(_PLUGIN, "observationId")))
         table.insert(lines, "  scientificName: " .. tostring(photo:getPropertyForPlugin(_PLUGIN, "scientificName")))
+        table.insert(lines, "  taxonRank: " .. tostring(photo:getPropertyForPlugin(_PLUGIN, "taxonRank")))
+        table.insert(lines, "  taxonId: " .. tostring(photo:getPropertyForPlugin(_PLUGIN, "taxonId")))
         table.insert(lines, "  colorNameForLabel: " .. tostring(photo:getRawMetadata("colorNameForLabel")))
         table.insert(lines, "")
     end

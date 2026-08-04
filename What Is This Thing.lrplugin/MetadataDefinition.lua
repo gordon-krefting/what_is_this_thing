@@ -97,6 +97,23 @@ return {
             },
         },
         {
+            id = "taxonId",
+            title = "iNat Taxon ID",
+            dataType = "string",
+            searchable = true,
+            -- The iNat TAXON id (the species/genus/etc. itself, e.g.
+            -- inaturalist.org/taxa/58514) -- deliberately distinct from
+            -- iNatObservationId below (a specific OBSERVATION record).
+            -- Written by KeywordWriter.applyIdentification alongside
+            -- scientificName/commonName/taxonRank whenever a candidate
+            -- carries one (every identification path already resolves
+            -- this via INaturalist.getMajorAncestryForCandidate before
+            -- reaching applyIdentification, so it's always available in
+            -- practice) -- added 2026-08-04 so a report can link out to
+            -- "all my observations of this taxon" without a by-name
+            -- lookup.
+        },
+        {
             id = "idConfidence",
             title = "ID Confidence",
             dataType = "string",

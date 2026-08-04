@@ -57,6 +57,10 @@ return {
             file = "ObservationReport.lua",
         },
         {
+            title = "Backfill Taxon ID (one-off)",
+            file = "BackfillTaxonId.lua",
+        },
+        {
             title = "Show Observation Filenames (one-off)",
             file = "ShowObservationFilenames.lua",
         },

@@ -285,6 +285,9 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
             photo:setPropertyForPlugin(_PLUGIN, "scientificName", candidate.scientificName)
             photo:setPropertyForPlugin(_PLUGIN, "commonName", candidate.commonName)
             photo:setPropertyForPlugin(_PLUGIN, "taxonRank", rankValue)
+            if candidate.id then
+                photo:setPropertyForPlugin(_PLUGIN, "taxonId", tostring(candidate.id))
+            end
             if candidate.score then
                 photo:setPropertyForPlugin(_PLUGIN, "idConfidence", string.format("%.1f%%", candidate.score))
             end
