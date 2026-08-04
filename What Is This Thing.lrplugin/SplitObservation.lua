@@ -16,11 +16,23 @@ local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
 -- command) -- the sync's matching logic can't split one local group across
 -- two different iNat observations, so this needs to happen manually first.
 --
--- Also clears iNatObservationId/iNatObservationUrl on the selected photos
--- -- whatever they were linked to (if anything) is no longer reliable once
--- the group is split apart, so the next "Sync from iNaturalist" run
--- re-resolves each photo's real match from scratch, now that they're
--- independent.
+-- Also clears iNatObservationId/iNatObservationUrl/iNatQualityGrade/
+-- iNatSuggestedId on the selected photos -- whatever they were linked to
+-- (if anything) is no longer reliable once the group is split apart, so
+-- the next "Sync from iNaturalist" run re-resolves each photo's real
+-- match from scratch, now that they're independent. All four are cleared
+-- together (2026-08-03 -- previously only the two link fields were,
+-- leaving a stale quality grade/suggestion behind on an otherwise-unlinked
+-- photo).
+--
+-- EXCEPT a recovered placeholder (iNatRecoveredPlaceholder == "yes",
+-- see INatRecovery.lua): its filename IS the exact observation+photo pair
+-- it was downloaded from ("iNat_<observationId>_<photoId>.jpg") -- there's
+-- nothing uncertain about that link for sync to "re-resolve," so splitting
+-- it into its own local observation must NOT also clear it (confirmed
+-- live 2026-08-03: a merge-then-split on a placeholder alongside an
+-- ordinary RAW lost the placeholder's own certain iNat id right along
+-- with the RAW's genuinely-uncertain one).
 LrTasks.startAsyncTask(function()
     local catalog = LrApplication.activeCatalog()
     local photos = catalog:getTargetPhotos()
@@ -31,16 +43,25 @@ LrTasks.startAsyncTask(function()
     end
 
     catalog:withWriteAccessDo("Split into separate observations", function()
+        local unlinkedPhotos = {}
         for _, photo in ipairs(photos) do
             photo:setPropertyForPlugin(_PLUGIN, "observationId", KeywordWriter.generateUUID())
-            photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", nil)
-            photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", nil)
+            if photo:getPropertyForPlugin(_PLUGIN, "iNatRecoveredPlaceholder") ~= "yes" then
+                photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", nil)
+                photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", nil)
+                photo:setPropertyForPlugin(_PLUGIN, "iNatQualityGrade", nil)
+                photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", nil)
+                table.insert(unlinkedPhotos, photo)
+            end
         end
         -- The color label (if any) reflected the OLD, now-broken link --
         -- recompute now that iNatObservationId is cleared, so a
         -- previously purple/blue photo correctly drops to green (still
         -- identified locally, just no longer linked) rather than keeping
-        -- a stale color that no longer means anything. ColorCode.CLEARED
+        -- a stale color that no longer means anything. Only for the
+        -- photos actually unlinked above -- a preserved placeholder's
+        -- color is untouched by this transaction, so it's safe (and
+        -- correct) to just leave it alone entirely. ColorCode.CLEARED
         -- (not plain nil) signals "just explicitly cleared in THIS
         -- transaction" -- confirmed live 2026-08-02 that reading a
         -- just-written value back here isn't reliable. observationId is
@@ -48,7 +69,7 @@ LrTasks.startAsyncTask(function()
         -- above -- every photo reaching this command already had SOME
         -- non-nil observationId before the split, so the presence check
         -- this relies on gives the same true/false answer either way).
-        ColorCode.applyToPhotos(photos, { iNatObservationId = ColorCode.CLEARED })
+        ColorCode.applyToPhotos(unlinkedPhotos, { iNatObservationId = ColorCode.CLEARED })
     end)
 
     LrDialogs.message(
