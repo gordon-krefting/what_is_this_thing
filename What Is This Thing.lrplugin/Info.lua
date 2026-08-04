@@ -53,6 +53,10 @@ return {
             file = "ColorCodeIdentifications.lua",
         },
         {
+            title = "Observation Report",
+            file = "ObservationReport.lua",
+        },
+        {
             title = "Show Observation Filenames (one-off)",
             file = "ShowObservationFilenames.lua",
         },
