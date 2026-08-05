@@ -61,6 +61,7 @@ LrTasks.startAsyncTask(function()
                     representativePhoto = photo,
                     scientificName = photo:getPropertyForPlugin(_PLUGIN, "scientificName"),
                     commonName = photo:getPropertyForPlugin(_PLUGIN, "commonName"),
+                    iNatObservationId = photo:getPropertyForPlugin(_PLUGIN, "iNatObservationId"),
                     count = 0,
                 }
                 groupsById[obsId] = group
@@ -90,25 +91,71 @@ LrTasks.startAsyncTask(function()
             props.chosenIndex = 1
 
             local f = LrView.osFactory()
-            local radios = {}
+            -- Same disambiguation approach as the sync's own collision
+            -- picker (resolveClusterManually, INatSyncRunner.lua) -- a
+            -- text-only label isn't enough to tell two candidates apart
+            -- when they share the same species (confirmed live 2026-08-04:
+            -- two DISTINCT Vulpes vulpes candidates, both reading "Vulpes
+            -- vulpes (Red Fox) -- 1 photo", gave no way to tell which was
+            -- which). The radio's own title is just the filename -- short,
+            -- immediately recognizable, and the actual selectable label;
+            -- the thumbnail and iNat link status are the real
+            -- differentiators, since the species name is identical by
+            -- construction (that's exactly what makes these ambiguous).
+            local candidateColumns = {}
             for i, group in ipairs(groupOrder) do
-                local label = group.scientificName or "(unidentified)"
-                if group.commonName then
-                    label = label .. " (" .. group.commonName .. ")"
-                end
-                label = label .. string.format(" -- %d photo%s", group.count, group.count == 1 and "" or "s")
-                table.insert(radios, f:radio_button {
-                    title = label,
+                local filename = group.representativePhoto:getFormattedMetadata("fileName") or "?"
+                local radio = f:radio_button {
+                    title = filename,
                     value = LrView.bind("chosenIndex"),
                     checked_value = i,
-                })
+                    width_in_chars = 22,
+                }
+                local statusLines = {}
+                if group.count > 1 then
+                    table.insert(statusLines, group.count .. " photos in this group")
+                end
+                table.insert(statusLines,
+                    group.iNatObservationId and ("Linked to iNat #" .. group.iNatObservationId) or "Not yet linked to iNat")
+                local statusText = f:static_text {
+                    title = table.concat(statusLines, "\n"),
+                    width_in_chars = 22,
+                    height_in_lines = 2,
+                }
+                local photoView = f:catalog_photo {
+                    photo = group.representativePhoto,
+                    width = 150,
+                    height = 150,
+                    frame_width = 1,
+                }
+                table.insert(candidateColumns, f:column { photoView, radio, statusText })
+            end
+
+            -- Only name the species in the intro line when every candidate
+            -- actually shares one -- candidates can also be genuinely
+            -- DIFFERENT species (see Case 4/mock_test_mergeobservation.lua),
+            -- where naming just the first one would be misleading.
+            local sameSpecies = true
+            for _, group in ipairs(groupOrder) do
+                if group.scientificName ~= groupOrder[1].scientificName then
+                    sameSpecies = false
+                    break
+                end
+            end
+            local introText = "Multiple identifications found in the selection -- merge into:"
+            if sameSpecies then
+                local label = groupOrder[1].scientificName or "(unidentified)"
+                if groupOrder[1].commonName then
+                    label = label .. " (" .. groupOrder[1].commonName .. ")"
+                end
+                introText = "Multiple " .. label .. " identifications found in the selection -- merge into:"
             end
 
             local contents = f:column {
                 bind_to_object = props,
                 spacing = f:control_spacing(),
-                f:static_text { title = "Multiple identifications found in the selection -- merge into:" },
-                f:column(radios),
+                f:static_text { title = introText },
+                f:row(candidateColumns),
             }
 
             local result = LrDialogs.presentModalDialog {

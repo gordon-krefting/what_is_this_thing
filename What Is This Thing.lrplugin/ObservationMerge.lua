@@ -77,12 +77,37 @@ function ObservationMerge.merge(master, otherPhotos)
 
     local masterINatObservationId, masterINatObservationUrl, masterINatQualityGrade, masterINatSuggestedId =
         findExistingINatLink(orderedPhotos)
+    local masterGps = master:getRawMetadata("gps")
+    if not (masterGps and masterGps.latitude and masterGps.longitude) then
+        masterGps = nil
+    end
 
     -- Network call (ancestry lookup) -- must happen before the write
     -- transaction starts, not inside it.
     local resolvedCandidate, ancestry = INaturalist.getMajorAncestryForCandidate(candidate)
 
     KeywordWriter.applyIdentification(orderedPhotos, resolvedCandidate, ancestry)
+
+    -- Fills in GPS on any merged photo that doesn't already have its own --
+    -- deliberately from the MASTER specifically (per the user), not
+    -- "whichever merged photo happens to have one" the way the iNat link
+    -- above works -- unlike an iNat link (which a photo either definitely
+    -- has or doesn't, with no ambiguity about whose is "right"), several
+    -- merged photos could each have their OWN genuine GPS reading, and
+    -- guessing which one should win isn't this function's call to make.
+    -- Never overwrites a photo that already has GPS, including the master.
+    if masterGps then
+        catalog:withWriteAccessDo("Fill in missing GPS from merge master", function()
+            for _, photo in ipairs(orderedPhotos) do
+                if photo ~= master then
+                    local gps = photo:getRawMetadata("gps")
+                    if not (gps and gps.latitude and gps.longitude) then
+                        photo:setRawMetadata("gps", { latitude = masterGps.latitude, longitude = masterGps.longitude })
+                    end
+                end
+            end
+        end)
+    end
 
     if masterINatObservationId then
         catalog:withWriteAccessDo("Link merged photos to iNaturalist observation", function()
