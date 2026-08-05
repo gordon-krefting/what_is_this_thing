@@ -354,7 +354,21 @@ local function resolveClusterManually(cluster, progressLabel)
                         title = "Several photos and iNat observations share a capture time.\n"
                             .. "Which local photo is this?",
                     },
-                    f:row(candidateColumns),
+                    -- Confirmed live 2026-08-05: a cluster with enough
+                    -- candidates ran the row off the edge of the screen
+                    -- entirely, with no way to reach the later ones at
+                    -- all. scrolled_view gives a fixed-size viewport with
+                    -- a horizontal scroll bar instead of letting the row
+                    -- grow unbounded -- Mac OS hides the bar automatically
+                    -- when everything already fits, so this is a no-op
+                    -- visually for the common, few-candidates case.
+                    f:scrolled_view {
+                        width = 800,
+                        height = 230,
+                        horizontal_scroller = true,
+                        vertical_scroller = false,
+                        f:row(candidateColumns),
+                    },
                 }
 
                 local result = LrDialogs.presentModalDialog {
