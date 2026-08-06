@@ -252,9 +252,9 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     local catalog = LrApplication.activeCatalog()
     local caption = formatCaption(candidate)
     -- Nil rank means species by this codebase's established convention
-    -- (see isSpecies() in WhatIsThisAnimal.lua / linksForCandidate() in
-    -- WhatIsThisPlant.lua) -- normalize it here rather than storing an
-    -- ambiguous-looking blank/"(unknown)" value for the common case.
+    -- (see isSpecies() in WhatIsThisAnimal.lua) -- normalize it here
+    -- rather than storing an ambiguous-looking blank/"(unknown)" value
+    -- for the common case.
     local rankValue = candidate.rank or "species"
     local observationId = findExistingObservationId(photos) or KeywordWriter.generateUUID()
 

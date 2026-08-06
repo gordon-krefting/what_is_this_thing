@@ -26,12 +26,6 @@ local function isSpecies(r)
     return r.rank == nil or r.rank == "species"
 end
 
-local function urlEncode(str)
-    return (str:gsub("[^%w%-%.%_%~]", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end))
-end
-
 -- Highest-scoring entry matching the given species/non-species filter, or nil.
 local function bestMatching(results, wantSpecies)
     local best = nil
@@ -68,13 +62,17 @@ end
 
 -- iNaturalist's own vision API already gives us each candidate's taxon id,
 -- so most rows get a direct link for free. A candidate can still lack one
--- here (a Pl@ntNet result folded in via "Also try Pl@ntNet") -- falls back
--- to an iNat name search instead of leaving the row with no link at all.
+-- here (a Pl@ntNet result folded in via "Also try Pl@ntNet") -- resolved
+-- lazily on click instead (CandidatePicker's resolveUrl support), rather
+-- than linking to a search results page or paying for a name-search round
+-- trip on every row before the user has asked for any of them.
 local function linksForCandidate(r)
     local links = {}
-    local url = r.id and ("https://www.inaturalist.org/taxa/" .. tostring(r.id))
-        or ("https://www.inaturalist.org/taxa/search?q=" .. urlEncode(r.scientificName))
-    table.insert(links, { label = "iNat", url = url })
+    if r.id then
+        table.insert(links, { label = "iNat", url = "https://www.inaturalist.org/taxa/" .. tostring(r.id) })
+    else
+        table.insert(links, { label = "iNat", resolveUrl = function() return INaturalist.taxonUrlForCandidate(r) end })
+    end
     return links
 end
 
@@ -83,13 +81,13 @@ LrTasks.startAsyncTask(function()
     local photos = catalog:getTargetPhotos()
 
     if #photos == 0 then
-        LrDialogs.message("iNaturalist Identification", "No photos selected.", "info")
+        LrDialogs.message("Species Identification", "No photos selected.", "info")
         return
     end
 
     if #photos > MAX_PHOTOS then
         LrDialogs.message(
-            "iNaturalist Identification",
+            "Species Identification",
             string.format(
                 "You selected %d photos, but this command expects at most %d -- a few angles of the same animal, not a batch. Select fewer photos and try again.",
                 #photos, MAX_PHOTOS
@@ -105,7 +103,7 @@ LrTasks.startAsyncTask(function()
 
     LrFunctionContext.callWithContext("WhatIsThisAnimalLookup", function(context)
         local progressScope = LrDialogs.showModalProgressDialog {
-            title = "iNaturalist Identification",
+            title = "Species Identification",
             caption = "Exporting photos...",
             cannotCancel = true,
             functionContext = context,
@@ -115,11 +113,25 @@ LrTasks.startAsyncTask(function()
 
         if not exportOk then
             progressScope:done()
-            LrDialogs.message("iNaturalist Identification", "Export failed: " .. tostring(photoPathsOrError), "critical")
+            LrDialogs.message("Species Identification", "Export failed: " .. tostring(photoPathsOrError), "critical")
             return
         end
 
         local photoPaths = photoPathsOrError
+
+        -- Smaller, separate export just for the ID dialog's on-screen
+        -- reference photo (CandidatePicker.lua's own 400x400 box) --
+        -- decoding the full 2048px upload-sized JPEGs on every paging
+        -- click was noticeably laggy, live-confirmed 2026-08-07.
+        -- Best-effort: falls back to the upload-sized paths (still
+        -- correct, just slower to page through) if this smaller export
+        -- somehow fails, rather than blocking the whole command over a
+        -- display nicety.
+        local displayExportOk, displayPhotoPathsOrError, displayTempDir = LrTasks.pcall(ExportTemp.exportToTempDisplayJpegs, photos)
+        local displayPhotoPaths = displayExportOk and displayPhotoPathsOrError or photoPaths
+        if not displayExportOk then
+            displayTempDir = nil
+        end
 
         -- Every photo is guaranteed GPS at this point (ensureGpsOnAllPhotos
         -- either found it already present or just wrote it), so this always
@@ -146,7 +158,8 @@ LrTasks.startAsyncTask(function()
 
         if not ok then
             ExportTemp.cleanup(tempDir)
-            LrDialogs.message("iNaturalist Identification", "Lookup failed: " .. tostring(resultsOrError), "critical")
+            ExportTemp.cleanup(displayTempDir)
+            LrDialogs.message("Species Identification", "Lookup failed: " .. tostring(resultsOrError), "critical")
             return
         end
 
@@ -185,7 +198,11 @@ LrTasks.startAsyncTask(function()
             local currentCandidates = results
             local sectionLabelForIndex = nil
             local offerOtherService = "Also try Pl@ntNet"
-            local wantManualEntry, wantOtherService
+            local wantOtherService
+
+            -- Doesn't change across "Also try Pl@ntNet" reloads, so
+            -- resolved once up front rather than inside the loop.
+            local existingTag = KeywordWriter.findSpeciesName(photos[1])
 
             -- Runs at most twice: once with just iNaturalist's own results,
             -- and again with Pl@ntNet's folded in as a second labeled
@@ -195,13 +212,16 @@ LrTasks.startAsyncTask(function()
             -- merged/deduped -- see CandidatePicker.choose's doc comment.
             repeat
                 local existingCounts = KeywordWriter.countExistingPhotos(currentCandidates)
-                selected, wantManualEntry, wantOtherService = CandidatePicker.choose(
-                    "iNaturalist Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
+                selected, wantOtherService = CandidatePicker.choose(
+                    "Species Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
                     function(r) return existingCounts[r] end,
                     function() return commonAncestorGroups(currentCandidates) end,
                     offerOtherService,
                     sectionLabelForIndex,
-                    photos
+                    displayPhotoPaths,
+                    INaturalist.downloadThumbnailsForCandidate,
+                    existingTag,
+                    INaturalist.resolveByName
                 )
 
                 if wantOtherService then
@@ -209,7 +229,7 @@ LrTasks.startAsyncTask(function()
 
                     LrFunctionContext.callWithContext("TryPlantNet", function(innerContext)
                         local plantNetProgress = LrDialogs.showModalProgressDialog {
-                            title = "iNaturalist Identification",
+                            title = "Species Identification",
                             caption = "Trying Pl@ntNet...",
                             cannotCancel = true,
                             functionContext = innerContext,
@@ -234,7 +254,7 @@ LrTasks.startAsyncTask(function()
                             end
                         else
                             LrDialogs.message(
-                                "iNaturalist Identification",
+                                "Species Identification",
                                 "Pl@ntNet lookup failed: " .. tostring(plantNetResultOrError),
                                 "critical"
                             )
@@ -243,9 +263,7 @@ LrTasks.startAsyncTask(function()
                 end
             until not wantOtherService
 
-            if wantManualEntry then
-                selected, ancestry = ManualEntry.promptAndResolve()
-            elseif selected then
+            if selected then
                 -- Best-effort enrichment: degrades to an empty list (flat
                 -- "Species ID > name" tag) on any failure, so this never
                 -- blocks the core tag/title/caption write. Uses the
@@ -257,11 +275,39 @@ LrTasks.startAsyncTask(function()
 
         -- Only safe to clean up now -- the "Also try Pl@ntNet" path above
         -- needs these same temp JPEGs to still exist, since it reuses them
-        -- rather than re-exporting.
+        -- rather than re-exporting. displayTempDir is only used by the
+        -- now-closed CandidatePicker dialog(s), so it's always safe to
+        -- clean up here regardless.
         ExportTemp.cleanup(tempDir)
+        ExportTemp.cleanup(displayTempDir)
 
         if selected then
-            KeywordWriter.applyIdentification(photos, selected, ancestry or {})
+            -- A photo already linked to a real iNat observation (via the
+            -- "Sync from iNaturalist" feature) can silently drift out of
+            -- sync with it if the LOCAL tag is reassigned here without
+            -- also updating iNat -- applyIdentification only ever touches
+            -- the local tag, never iNatObservationId (see its own doc
+            -- comment), so nothing else would catch this. One warning
+            -- covers the whole batch since these commands always operate
+            -- on a handful of angles of the same organism.
+            local alreadyLinkedId = nil
+            for _, photo in ipairs(photos) do
+                alreadyLinkedId = photo:getPropertyForPlugin(_PLUGIN, "iNatObservationId")
+                if alreadyLinkedId then break end
+            end
+            local proceed = true
+            if alreadyLinkedId then
+                proceed = LrDialogs.confirm(
+                    "Already linked to iNat",
+                    "This photo is already linked to iNat observation #" .. tostring(alreadyLinkedId)
+                        .. ". Reassigning its local ID here won't update iNat -- the two would then disagree"
+                        .. " until the observation itself is edited or re-synced. Continue anyway?",
+                    "Continue", "Cancel"
+                ) == "ok"
+            end
+            if proceed then
+                KeywordWriter.applyIdentification(photos, selected, ancestry or {})
+            end
         end
     end)
 end)

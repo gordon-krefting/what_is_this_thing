@@ -46,7 +46,7 @@ LrTasks.startAsyncTask(function()
     if not scientificName then
         LrDialogs.message(
             "Edit Taxon Info",
-            "This photo hasn't been identified yet -- run \"iNaturalist Identification\" or \"Pl@ntNet Identification\" on it first.",
+            "This photo hasn't been identified yet -- run \"Species Identification\" on it first.",
             "info"
         )
         return

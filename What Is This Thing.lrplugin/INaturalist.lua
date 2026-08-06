@@ -325,11 +325,18 @@ end
 
 -- Resolves a scientific name (optionally constrained to a rank, e.g.
 -- "species"/"genus"/"family") to an iNaturalist taxon id via their public
--- taxa search, requiring an exact (case-sensitive) name match against the
--- results -- so a fuzzy/wrong match is never silently accepted. Returns nil
--- if no exact match is found or the request fails.
+-- taxa search, requiring an exact name match (case-insensitive, and with
+-- leading/trailing whitespace trimmed -- easy typos for a hand-typed
+-- name, e.g. the manual-entry flow in CandidatePicker.lua, but not the
+-- same risk as a fuzzy/spelling-tolerant match) against the results, so a
+-- wrong match is never silently accepted. The candidate's own
+-- scientificName still ends up as iNaturalist's own correctly-cased
+-- canonical name, not whatever case the caller passed in (see
+-- resolveByName's use of taxon.name below). Returns nil if no exact match
+-- is found or the request fails.
 local function findTaxonId(scientificName, rank)
-    local url = TAXA_SEARCH_URL .. "?q=" .. urlEncode(scientificName) .. "&per_page=10"
+    local trimmedName = scientificName:match("^%s*(.-)%s*$")
+    local url = TAXA_SEARCH_URL .. "?q=" .. urlEncode(trimmedName) .. "&per_page=10"
     if rank then
         url = url .. "&rank=" .. urlEncode(rank)
     end
@@ -349,7 +356,7 @@ local function findTaxonId(scientificName, rank)
     end
 
     for _, r in ipairs(decoded.results or {}) do
-        if r.name == scientificName then
+        if r.name:lower() == trimmedName:lower() then
             return r.id
         end
     end
@@ -425,9 +432,10 @@ end
 -- Resolves a user-typed scientific name to a full candidate + ancestry, for
 -- the case where neither iNaturalist's nor Pl@ntNet's own identification
 -- found a match but the user already knows what it is. Requires an exact
--- (case-sensitive) match against iNaturalist's taxonomy, same as
--- getMajorAncestryByName -- a typo or unrecognized name fails rather than
--- silently guessing.
+-- match (case-insensitive, whitespace-trimmed -- see findTaxonId's own
+-- doc comment) against iNaturalist's taxonomy, same as
+-- getMajorAncestryByName -- a real spelling typo or unrecognized name
+-- still fails rather than silently guessing.
 --
 -- Returns candidate, ancestry:
 --   candidate - { id, score, scientificName, commonName, rank }, the same
@@ -471,8 +479,8 @@ end
 -- confidence scores. Mixing e.g. iNaturalist and Pl@ntNet candidates into
 -- one call here would silently combine incomparable numbers into a
 -- meaningless sum. Callers with more than one service's candidates on
--- screen at once (WhatIsThisAnimal.lua/WhatIsThisPlant.lua's "Also try X"
--- flow) must call this once per service and keep the results in separate,
+-- screen at once (WhatIsThisAnimal.lua's "Also try Pl@ntNet" flow) must
+-- call this once per service and keep the results in separate,
 -- clearly-labeled groups -- never merge them into one option list.
 --
 -- Earlier versions of this forced a single lowest-common-ancestor (LCA)
@@ -1202,6 +1210,83 @@ function INaturalist.downloadAllObservationThumbnails(observation)
         end
     end
     return paths
+end
+
+-- Downloads every available photo for a taxon -- its default_photo (the
+-- one shown at the top of its iNaturalist taxon page) plus any others
+-- from taxon_photos -- to local temp files, for the ID candidate
+-- picker's live preview + paging of whichever row is currently selected.
+-- Confirmed live against the real API 2026-08-07: default_photo and
+-- taxon_photos are separate fields -- default_photo is its own selection,
+-- NOT necessarily repeated as an entry in taxon_photos -- so both are
+-- combined here, deduped by photo id (a taxon's default_photo is often
+-- also its "best" taxon_photos entry, and showing the exact same image
+-- twice while paging would be a confusing no-op click). Shares
+-- downloadPhotoThumbnail's "small" size + one-shot temp-file mechanics
+-- above. Returns a list of temp paths (empty if the taxon id doesn't
+-- resolve, has no photos, or every download failed) -- a photo whose own
+-- download failed is simply omitted, never blocks showing the ones that
+-- worked.
+function INaturalist.downloadTaxonThumbnails(taxonId)
+    local taxon = fetchTaxonDetail(taxonId)
+    if not taxon then
+        return {}
+    end
+
+    local photoEntries = {}
+    local seenPhotoIds = {}
+    if taxon.default_photo then
+        table.insert(photoEntries, taxon.default_photo)
+        seenPhotoIds[taxon.default_photo.id] = true
+    end
+    for _, taxonPhoto in ipairs(taxon.taxon_photos or {}) do
+        local photo = taxonPhoto.photo
+        if photo and not seenPhotoIds[photo.id] then
+            table.insert(photoEntries, photo)
+            seenPhotoIds[photo.id] = true
+        end
+    end
+
+    local paths = {}
+    for i, photo in ipairs(photoEntries) do
+        local path = downloadPhotoThumbnail(photo, "taxon-" .. tostring(taxonId) .. "-" .. tostring(i))
+        if path then
+            table.insert(paths, path)
+        end
+    end
+    return paths
+end
+
+-- Like downloadTaxonThumbnails, but for a picker candidate regardless of
+-- which service it came from -- same id-or-name dispatch as
+-- getMajorAncestryForCandidate/commonAncestorOptions: a candidate with a
+-- real iNat taxon id uses it directly, one without (a Pl@ntNet result)
+-- resolves by exact scientific-name match first. Returns an empty list
+-- if resolution fails.
+function INaturalist.downloadThumbnailsForCandidate(candidate)
+    local taxonId = candidate.id or findTaxonId(candidate.scientificName, candidate.rank)
+    if not taxonId then
+        return {}
+    end
+    return INaturalist.downloadTaxonThumbnails(taxonId)
+end
+
+-- Resolves any picker candidate to its iNaturalist taxon page URL,
+-- regardless of which service it came from -- same id-or-name dispatch as
+-- downloadThumbnailsForCandidate/getMajorAncestryForCandidate/
+-- commonAncestorOptions. For a candidate that already carries a real
+-- `id` (iNaturalist-sourced) this is free, no network call; for one that
+-- doesn't (Pl@ntNet-sourced) it costs one name-search round trip.
+-- Callers that don't want that cost paid at dialog-build time should call
+-- this lazily, on demand, rather than for every row up front -- see
+-- CandidatePicker.lua's `resolveUrl` link support. Returns nil if
+-- resolution fails.
+function INaturalist.taxonUrlForCandidate(candidate)
+    local taxonId = candidate.id or findTaxonId(candidate.scientificName, candidate.rank)
+    if not taxonId then
+        return nil
+    end
+    return "https://www.inaturalist.org/taxa/" .. tostring(taxonId)
 end
 
 -- Downloads the ORIGINAL (largest available, still capped by iNat at
