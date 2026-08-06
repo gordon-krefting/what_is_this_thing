@@ -16,8 +16,6 @@ already have the history of what shipped and when.
 - Show local + iNat observation counts for the selected species (deferred
   to the ID-process redo)
 - Design a report with info about local observations (spec TBD)
-- Consolidate/simplify the Identify processes -- worth revisiting now that
-  Pl@ntNet's standalone command is gone
 - Graceful degradation when the external archive drive isn't mounted
 - Trim the one-off diagnostics (e.g. `logClaim`/`inat-sync-claim-trace.log`,
   no longer needed since the species-first sync redesign)
