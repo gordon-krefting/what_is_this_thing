@@ -453,24 +453,59 @@ function INaturalist.resolveByName(scientificName)
     return candidate, majorAncestryFromTaxon(taxon)
 end
 
--- Computes the lowest common ancestor of a set of candidates (each needing
--- a real iNaturalist taxon `id` -- Pl@ntNet-sourced candidates don't have
--- one and are silently skipped). This is a client-side fallback for when
--- iNaturalist's own confidence-gated common_ancestor rollup doesn't fire
--- (e.g. a batch of very scattered, low-confidence genus guesses) -- so the
--- user can still tag at some rolled-up level instead of guessing wrong.
+-- Finds candidate ancestor rollups for a set of candidates. A candidate
+-- with a real iNaturalist taxon `id` uses it directly; one without (e.g. a
+-- Pl@ntNet result) is resolved by exact scientific-name match instead, the
+-- same fallback getMajorAncestryForCandidate already uses -- so a candidate
+-- is only skipped if that resolution genuinely fails to find a match. This
+-- is a client-side fallback for when iNaturalist's own confidence-gated
+-- common_ancestor rollup doesn't fire (e.g. a batch of very scattered,
+-- low-confidence genus guesses) -- so the user can still tag at some
+-- rolled-up level instead of guessing wrong.
+--
+-- IMPORTANT: `candidates` must all come from the *same* identification
+-- service/run. Scores are summed across sibling candidates (see below) on
+-- the premise that they're mutually exclusive alternative readings of the
+-- same evidence -- true within one model's output, but not between two
+-- different services' independently-computed, differently-calibrated
+-- confidence scores. Mixing e.g. iNaturalist and Pl@ntNet candidates into
+-- one call here would silently combine incomparable numbers into a
+-- meaningless sum. Callers with more than one service's candidates on
+-- screen at once (WhatIsThisAnimal.lua/WhatIsThisPlant.lua's "Also try X"
+-- flow) must call this once per service and keep the results in separate,
+-- clearly-labeled groups -- never merge them into one option list.
+--
+-- Earlier versions of this forced a single lowest-common-ancestor (LCA)
+-- across the *entire* candidate list -- one taxonomic outlier (e.g. a Brown
+-- Bear guess sitting alongside a cluster of bovid guesses) would drag that
+-- single result all the way up to a near-useless rank (e.g. superorder
+-- Laurasiatheria), even though the bovid cluster on its own shares a much
+-- more specific, useful ancestor. Instead of one forced-broad result, this
+-- returns up to `maxOptions` rollup options -- one per meaningful branch
+-- point -- so a good option can exist for a subset of the candidates even
+-- when the full set shares nothing useful.
 --
 -- Fetches each usable candidate's full ancestor chain (one taxon-detail
 -- round trip per candidate -- meant to be called on demand, not on every
 -- identify, to avoid the extra API load/latency on the common case), then
--- finds the deepest taxon shared by all of them (the longest common prefix
--- of their ancestor-id lists, which are already ordered broadest-first).
+-- merges all the chains into a single tree (shared prefixes collapsed
+-- together). Every internal branch node of that tree is, by construction,
+-- the LCA of exactly the original candidates in its subtree -- so this only
+-- ever considers real, contiguous taxonomic groupings (e.g. genus Bos
+-- naturally groups Bison + Wisent + Domestic Cattle in one branch, separate
+-- from Brown Bear's own branch), never an arbitrary/nonsensical
+-- combination, and building it costs time proportional to the total chain
+-- length -- NOT the 2^N combinatorial search a brute-force "try every
+-- subset" approach would need.
 --
--- Returns candidate, ancestry (same shapes as resolveByName), or nil, {} if
--- fewer than 2 candidates have a usable id, or no ancestor is shared at all
--- (e.g. the candidates span different kingdoms).
+-- Returns a list of { candidate, ancestry, memberCount }, each shaped like
+-- resolveByName's own return pair, plus memberCount (how many of the
+-- original candidates this option rolls up) -- sorted best (highest score)
+-- first. Empty list if fewer than 2 candidates resolve to a usable taxon,
+-- or none share any ancestor at all (e.g. the candidates span different
+-- kingdoms).
 --
--- The candidate's score is the *sum* of the contributing candidates' own
+-- Each option's score is the *sum* of the contributing candidates' own
 -- scores, but only over the ones that aren't themselves an ancestor of
 -- another candidate in the set. Sibling suggestions (e.g. two different
 -- genera in the same family) are mutually exclusive possibilities for what
@@ -485,13 +520,20 @@ end
 -- geo-based frequency boost too), so summing genuinely disjoint candidates
 -- can nominally exceed 100 -- that reflects the input scores not being true
 -- probabilities, not a bug in this logic.
-function INaturalist.commonAncestorOf(candidates)
+function INaturalist.commonAncestorOptions(candidates, maxOptions)
+    maxOptions = maxOptions or 3
+
     local chains = {}
     local scores = {}
 
     for _, c in ipairs(candidates) do
-        if c.id then
-            local taxon = fetchTaxonDetail(c.id)
+        -- Same id-or-name dispatch as getMajorAncestryForCandidate: use the
+        -- real taxon id when present, otherwise resolve by exact
+        -- scientific-name match (the only option for a Pl@ntNet result,
+        -- which never carries an iNat id of its own).
+        local taxonId = c.id or findTaxonId(c.scientificName, c.rank)
+        if taxonId then
+            local taxon = fetchTaxonDetail(taxonId)
             if taxon then
                 local chain = {}
                 for _, a in ipairs(taxon.ancestors or {}) do
@@ -505,74 +547,136 @@ function INaturalist.commonAncestorOf(candidates)
     end
 
     if #chains < 2 then
-        return nil, {}
+        return {}
     end
 
-    local totalScore = 0
-    for i, chain in ipairs(chains) do
-        local selfId = chain[#chain].id
-        local isAncestorOfAnother = false
-        for j, otherChain in ipairs(chains) do
-            if j ~= i then
-                for k = 1, #otherChain - 1 do
-                    if otherChain[k].id == selfId then
-                        isAncestorOfAnother = true
-                        break
-                    end
-                end
+    -- Merge every chain into one tree. `root` is a sentinel with no taxon
+    -- of its own, just children keyed by taxon id; every real node tracks
+    -- its parent (to reconstruct ancestry later) and, once a candidate's
+    -- own chain ends on it, which original candidate that was.
+    local root = { children = {}, depth = 0 }
+    for chainIndex, chain in ipairs(chains) do
+        local node = root
+        for _, step in ipairs(chain) do
+            local child = node.children[step.id]
+            if not child then
+                child = {
+                    id = step.id, rank = step.rank, name = step.name, commonName = step.commonName,
+                    children = {}, parent = node, depth = node.depth + 1,
+                }
+                node.children[step.id] = child
             end
-            if isAncestorOfAnother then
-                break
-            end
+            node = child
         end
-        if not isAncestorOfAnother then
-            totalScore = totalScore + scores[i]
-        end
+        node.isOwnCandidate = true
+        node.candidateIndex = chainIndex
     end
 
-    local shortestLength = #chains[1]
-    for _, chain in ipairs(chains) do
-        if #chain < shortestLength then
-            shortestLength = #chain
+    -- Post-order walk: bubble each node's own candidate (if any) plus every
+    -- descendant's candidates up to itself, so every node ends up knowing
+    -- exactly which original candidates its subtree covers.
+    local allNodes = {}
+    local function visit(node)
+        node.candidateIndices = {}
+        if node.isOwnCandidate then
+            table.insert(node.candidateIndices, node.candidateIndex)
         end
-    end
-
-    local commonLength = 0
-    for i = 1, shortestLength do
-        local id = chains[1][i].id
-        local allMatch = true
-        for _, chain in ipairs(chains) do
-            if chain[i].id ~= id then
-                allMatch = false
-                break
+        for _, child in pairs(node.children) do
+            visit(child)
+            for _, idx in ipairs(child.candidateIndices) do
+                table.insert(node.candidateIndices, idx)
             end
         end
-        if allMatch then
-            commonLength = i
-        else
-            break
+        if node.id then
+            table.insert(allNodes, node)
+        end
+    end
+    visit(root)
+
+    -- Same anti-double-counting rule as before: a candidate whose own node
+    -- has another candidate anywhere in its subtree is an ancestor of that
+    -- other one, so its own score is excluded from any rollup sum -- the
+    -- broader guess's probability mass already overlaps the more specific
+    -- one's. This fact is subtree-independent (an ancestor/descendant
+    -- relationship doesn't change depending on which node's rollup you're
+    -- computing), so it's computed once globally rather than per option.
+    local isAncestorOfAnother = {}
+    for _, node in ipairs(allNodes) do
+        if node.isOwnCandidate then
+            isAncestorOfAnother[node.candidateIndex] = #node.candidateIndices > 1
         end
     end
 
-    if commonLength == 0 then
-        return nil, {}
+    local function rollupScore(node)
+        local total = 0
+        for _, idx in ipairs(node.candidateIndices) do
+            if not isAncestorOfAnother[idx] then
+                total = total + scores[idx]
+            end
+        end
+        return total
     end
 
-    local lca = chains[1][commonLength]
-    local candidate = {
-        id = lca.id,
-        score = totalScore,
-        scientificName = lca.name,
-        commonName = lca.commonName,
-        rank = lca.rank,
-    }
-
-    local ancestryEntries = {}
-    for i = 1, commonLength - 1 do
-        table.insert(ancestryEntries, chains[1][i])
+    -- Only nodes that actually roll up more than one candidate are
+    -- meaningful options -- a node covering just one candidate carries no
+    -- more information than that candidate's own already-shown row.
+    local rollupNodes = {}
+    for _, node in ipairs(allNodes) do
+        if #node.candidateIndices > 1 then
+            table.insert(rollupNodes, node)
+        end
     end
 
-    return candidate, filterMajorRanks(ancestryEntries)
+    -- Dedupe by exact candidate membership -- if two branch points cover
+    -- the identical set of original candidates (possible when a rank has
+    -- only one representative at each level in between), keep only the
+    -- deepest (most specific) one; a broader node with the same membership
+    -- adds no new information.
+    local bestByMembership = {}
+    for _, node in ipairs(rollupNodes) do
+        local members = {}
+        for _, idx in ipairs(node.candidateIndices) do
+            table.insert(members, idx)
+        end
+        table.sort(members)
+        local key = table.concat(members, ",")
+        local existing = bestByMembership[key]
+        if not existing or node.depth > existing.depth then
+            bestByMembership[key] = node
+        end
+    end
+    local deduped = {}
+    for _, node in pairs(bestByMembership) do
+        table.insert(deduped, node)
+    end
+
+    table.sort(deduped, function(a, b) return rollupScore(a) > rollupScore(b) end)
+
+    local results = {}
+    for i = 1, math.min(maxOptions, #deduped) do
+        local node = deduped[i]
+
+        local ancestryEntries = {}
+        local step = node.parent
+        while step and step.id do
+            table.insert(ancestryEntries, 1, { rank = step.rank, name = step.name, commonName = step.commonName })
+            step = step.parent
+        end
+
+        table.insert(results, {
+            candidate = {
+                id = node.id,
+                score = rollupScore(node),
+                scientificName = node.name,
+                commonName = node.commonName,
+                rank = node.rank,
+            },
+            ancestry = filterMajorRanks(ancestryEntries),
+            memberCount = #node.candidateIndices,
+        })
+    end
+
+    return results
 end
 
 -- Merge key for a taxon entry -- prefer the numeric taxon id (stable across
