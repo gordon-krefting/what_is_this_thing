@@ -3147,6 +3147,79 @@ default Cancel label, return value not distinguished from OK -- but the
 user's complaint was specifically about the no-good-candidate notice;
 left as-is for now, revisit if it comes up.
 
+## ID candidate picker redesigned as iNaturalist/Pl@ntNet/Manual tabs (2026-08-07)
+
+The candidate picker (`CandidatePicker.lua`) had grown a flat, single-list
+layout with pre-allocated-but-hidden rows for common-ancestor rollups and
+manual entry -- the user reported live that hidden rows "leave really odd
+gaps in the dialog box." Collapsible panels/disclosure controls don't
+exist anywhere in LrView (checked the SDK docs directly), and
+`LrView.conditionalItem` doesn't help either -- confirmed it evaluates its
+condition once at view-description-generation time, not reactively, so it
+can't respond to data arriving after the dialog is already showing.
+
+**Fix**: rebuilt the dialog around `f:tab_view` -- three tabs
+(iNaturalist, Pl@ntNet, Manual Entry), each self-contained. Verified live
+first with a throwaway `TabViewTest.lua` diagnostic (since deleted) that
+`tab_view`'s `value` is a normal bindable property, same mechanism as
+`selectedIndex` elsewhere in this file, and that a mostly-hidden
+fixed-size tab panel renders fine.
+
+- Each service tab reserves `MAX_CANDIDATES_PER_TAB` (10) candidate rows
+  and `MAX_ANCESTOR_OPTIONS_PER_TAB` (3) common-ancestor rollup rows plus
+  its own "Find Common Ancestor" button -- same pre-allocate-and-hide-until-
+  populated pattern as before, just now scoped to one tab's worth of
+  content instead of a shared flat list, so a hidden row's reserved space
+  reads as normal tab layout rather than a stray gap.
+- A single flat `props.selectedIndex` still spans every tab's slots (iNat
+  candidates 1-10, iNat ancestors 11-13, Pl@ntNet candidates 14-23,
+  Pl@ntNet ancestors 24-26, manual entry 27) -- whichever radio is
+  checked, in ANY tab, is unambiguous and drives the live thumbnail
+  preview the same way regardless of which tab is currently being viewed.
+- **Pl@ntNet's fetch is now lazy**: triggered on first view of its own tab
+  (an `activeTab` observer) instead of eagerly reloading the whole dialog
+  via the old "Also try Pl@ntNet" button -- fetched at most once per
+  dialog (a `plantNetFetchStarted` flag), with a progress label showing
+  "Looking up species...", then either hiding on success, or reporting "no
+  matches found" / the failure inline. iNaturalist's own lookup stays
+  eager (unchanged) -- a deliberate, acknowledged asymmetry, since it's
+  already known before the dialog opens.
+- Manual Entry became its own tab (text field + Look Up + inline error +
+  one pre-allocated result row) rather than a footer bolted onto the
+  candidate list.
+- `CandidatePicker.choose` moved from 13 positional arguments to a single
+  options table -- the positional signature had become unmanageable.
+  `WhatIsThisAnimal.lua` updated to match; its `commonAncestorGroups`/
+  `sectionLabelForIndex`/`offerOtherService`/the `repeat...until not
+  wantOtherService` reload loop are all gone -- each tab now calls
+  `INaturalist.commonAncestorOptions` directly on just its own candidates.
+
+**Follow-up polish after live testing**: dropped the `scrolled_view`
+wrapper around each tab's content -- with the flat list gone, each tab's
+worst case (14 rows) fits without scrolling, so the scroll viewport (a
+leftover from the old unbounded-list layout) was pure overhead. Fixed an
+inconsistent-spacing bug in the iNat thumbnail's paging row: its counter
+label starts with an empty title that gets set later, and a `static_text`
+control doesn't grow to fit a title set after construction (a previously-
+documented gotcha, see below) -- gave it a fixed `width_in_chars` to match
+the local reference photo's own counter. Both photo pagers (local
+reference and iNat thumbnail) now wrap around at either end instead of
+disabling their prev/next arrows at the boundaries, per the user's
+request.
+
+Testing: `mock_test_candidatepicker.lua` rewritten from scratch (the old
+11-case suite used the removed positional-argument API) -- 16 cases
+covering eager iNat population, lazy Pl@ntNet fetch-and-cache-on-first-
+tab-view, the three progress-label states, the global cross-tab index
+math (a Pl@ntNet-range index must never resolve to an iNat candidate),
+per-tab "Find Common Ancestor" scoping, inline manual entry (success and
+no-match), existing-tag/existing-count display, lazy `resolveUrl`
+resolution, and the live thumbnail preview tracking whichever tab-agnostic
+selection is current, plus both pagers' wraparound.
+
+Confirmed working live by the user for both the initial redesign and the
+follow-up fixes before committing (`b999551`, `34d03a0`).
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
