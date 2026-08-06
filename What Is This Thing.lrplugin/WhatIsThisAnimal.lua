@@ -26,6 +26,12 @@ local function isSpecies(r)
     return r.rank == nil or r.rank == "species"
 end
 
+local function urlEncode(str)
+    return (str:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 -- Highest-scoring entry matching the given species/non-species filter, or nil.
 local function bestMatching(results, wantSpecies)
     local best = nil
@@ -37,24 +43,38 @@ local function bestMatching(results, wantSpecies)
     return best
 end
 
-local function wikipediaUrl(name)
-    local titled = name:gsub(" ", "_")
-    titled = titled:gsub("[^%w%-%.%_%~]", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    return "https://en.wikipedia.org/wiki/" .. titled
+-- Splits a (possibly two-service) candidate list into per-service common-
+-- ancestor rollup groups for CandidatePicker's "Find Common Ancestor"
+-- button -- iNaturalist candidates always carry a real taxon `id`,
+-- Pl@ntNet ones never do, so that alone is a reliable split regardless of
+-- which service's results were fetched first. Each group is rolled up
+-- independently and kept in its own labeled group -- see
+-- INaturalist.commonAncestorOptions' doc comment for why the two services'
+-- scores must never be summed together in one rollup.
+local function commonAncestorGroups(candidates)
+    local withId, withoutId = {}, {}
+    for _, r in ipairs(candidates) do
+        table.insert(r.id and withId or withoutId, r)
+    end
+    local groups = {}
+    if #withId > 0 then
+        table.insert(groups, { label = "iNaturalist", options = INaturalist.commonAncestorOptions(withId) })
+    end
+    if #withoutId > 0 then
+        table.insert(groups, { label = "Pl@ntNet", options = INaturalist.commonAncestorOptions(withoutId) })
+    end
+    return groups
 end
 
 -- iNaturalist's own vision API already gives us each candidate's taxon id,
--- so the iNat link is free -- no extra lookup needed. Wikipedia's
--- consistent /wiki/Genus_species title pattern works reasonably well for
--- higher ranks too (e.g. "Lampyridae"), so it's added for every row.
+-- so most rows get a direct link for free. A candidate can still lack one
+-- here (a Pl@ntNet result folded in via "Also try Pl@ntNet") -- falls back
+-- to an iNat name search instead of leaving the row with no link at all.
 local function linksForCandidate(r)
     local links = {}
-    if r.id then
-        table.insert(links, { label = "iNat", url = "https://www.inaturalist.org/taxa/" .. tostring(r.id) })
-    end
-    table.insert(links, { label = "Wikipedia", url = wikipediaUrl(r.scientificName) })
+    local url = r.id and ("https://www.inaturalist.org/taxa/" .. tostring(r.id))
+        or ("https://www.inaturalist.org/taxa/search?q=" .. urlEncode(r.scientificName))
+    table.insert(links, { label = "iNat", url = url })
     return links
 end
 
@@ -178,7 +198,7 @@ LrTasks.startAsyncTask(function()
                 selected, wantManualEntry, wantOtherService = CandidatePicker.choose(
                     "iNaturalist Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
                     function(r) return existingCounts[r] end,
-                    function() return INaturalist.commonAncestorOf(currentCandidates) end,
+                    function() return commonAncestorGroups(currentCandidates) end,
                     offerOtherService,
                     sectionLabelForIndex,
                     photos

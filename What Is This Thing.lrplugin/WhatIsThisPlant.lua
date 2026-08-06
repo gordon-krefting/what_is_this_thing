@@ -27,12 +27,27 @@ local function urlEncode(str)
     end))
 end
 
-local function wikipediaUrl(name)
-    local titled = name:gsub(" ", "_")
-    titled = titled:gsub("[^%w%-%.%_%~]", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    return "https://en.wikipedia.org/wiki/" .. titled
+-- Splits a (possibly two-service) candidate list into per-service common-
+-- ancestor rollup groups for CandidatePicker's "Find Common Ancestor"
+-- button -- iNaturalist candidates always carry a real taxon `id`,
+-- Pl@ntNet ones never do, so that alone is a reliable split regardless of
+-- which service's results were fetched first. Each group is rolled up
+-- independently and kept in its own labeled group -- see
+-- INaturalist.commonAncestorOptions' doc comment for why the two services'
+-- scores must never be summed together in one rollup.
+local function commonAncestorGroups(candidates)
+    local withId, withoutId = {}, {}
+    for _, r in ipairs(candidates) do
+        table.insert(r.id and withId or withoutId, r)
+    end
+    local groups = {}
+    if #withId > 0 then
+        table.insert(groups, { label = "iNaturalist", options = INaturalist.commonAncestorOptions(withId) })
+    end
+    if #withoutId > 0 then
+        table.insert(groups, { label = "Pl@ntNet", options = INaturalist.commonAncestorOptions(withoutId) })
+    end
+    return groups
 end
 
 -- Pl@ntNet's own species pages key on "scientificName authorship" together
@@ -40,7 +55,7 @@ end
 -- example plus our own captured API response ("bestMatch": "Tradescantia
 -- ohiensis Raf."). Only species-level results carry an authorship (and a
 -- confirmed URL pattern) -- genus/family rollup entries have neither, so
--- those rows get no Pl@ntNet link, just iNat search + Wikipedia.
+-- those rows get no Pl@ntNet link, just iNat search.
 --
 -- KNOWN LIMITATION: when a species has been taxonomically reclassified,
 -- Pl@ntNet's identification API returns the current accepted name, but
@@ -50,7 +65,7 @@ end
 -- no cheap way to detect this from the API response (would need a GBIF
 -- synonym lookup per candidate, too slow for populating every dialog row),
 -- so this is accepted as an occasional dead link rather than fixed -- the
--- iNat/Wikipedia links alongside it are a fallback for exactly this case.
+-- iNat link alongside it is a fallback for exactly this case.
 local function linksForCandidate(r)
     local links = {}
 
@@ -69,7 +84,6 @@ local function linksForCandidate(r)
         label = "iNat",
         url = "https://www.inaturalist.org/taxa/search?q=" .. urlEncode(r.scientificName),
     })
-    table.insert(links, { label = "Wikipedia", url = wikipediaUrl(r.scientificName) })
 
     return links
 end
@@ -190,7 +204,7 @@ LrTasks.startAsyncTask(function()
                 selected, wantManualEntry, wantOtherService = CandidatePicker.choose(
                     "Pl@ntNet Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
                     function(r) return existingCounts[r] end,
-                    function() return INaturalist.commonAncestorOf(currentCandidates) end,
+                    function() return commonAncestorGroups(currentCandidates) end,
                     offerOtherService,
                     sectionLabelForIndex,
                     photos
