@@ -60,12 +60,23 @@ end
 -- different services are never merged/deduped by this module -- they're
 -- just shown as separate labeled groups in one flat, still-indexed list.
 --
+-- `photos`, the photos being identified (non-empty -- both real callers
+-- already refuse to reach this point with none selected), shows
+-- photos[1] as a large 400x400 reference image alongside the candidate
+-- list -- these ID commands work on a small batch of angles of the same
+-- organism, so one representative image is enough. Added 2026-08-05,
+-- since this dialog previously had no image at all, unlike the
+-- merge/sync collision pickers.
+--
 -- Returns selected, wantManualEntry, wantOtherService:
 --   - a candidate was picked: selected = that candidate, others false
 --   - "Enter Manually" was clicked: wantManualEntry = true, others nil/false
 --   - the other-service button was clicked: wantOtherService = true
 --   - canceled: all nil/false
-function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForCandidate, countForCandidate, computeCommonAncestor, otherServiceButtonLabel, sectionLabelForIndex)
+function CandidatePicker.choose(
+    title, candidates, defaultIndex, hint, linksForCandidate, countForCandidate, computeCommonAncestor,
+    otherServiceButtonLabel, sectionLabelForIndex, photos
+)
     local selected = nil
     local wantManualEntry = false
     local wantOtherService = false
@@ -173,7 +184,10 @@ function CandidatePicker.choose(title, candidates, defaultIndex, hint, linksForC
             table.insert(args, f:row { commonAncestorRadio, commonAncestorButton })
         end
 
-        local contents = f:column(args)
+        local contents = f:row {
+            f:catalog_photo { photo = photos[1], width = 400, height = 400, frame_width = 1 },
+            f:column(args),
+        }
 
         local result = LrDialogs.presentModalDialog {
             title = title,

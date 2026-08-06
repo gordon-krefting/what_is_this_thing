@@ -192,7 +192,8 @@ LrTasks.startAsyncTask(function()
                     function(r) return existingCounts[r] end,
                     function() return INaturalist.commonAncestorOf(currentCandidates) end,
                     offerOtherService,
-                    sectionLabelForIndex
+                    sectionLabelForIndex,
+                    photos
                 )
 
                 if wantOtherService then
