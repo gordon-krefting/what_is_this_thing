@@ -37,29 +37,6 @@ local function bestMatching(results, wantSpecies)
     return best
 end
 
--- Splits a (possibly two-service) candidate list into per-service common-
--- ancestor rollup groups for CandidatePicker's "Find Common Ancestor"
--- button -- iNaturalist candidates always carry a real taxon `id`,
--- Pl@ntNet ones never do, so that alone is a reliable split regardless of
--- which service's results were fetched first. Each group is rolled up
--- independently and kept in its own labeled group -- see
--- INaturalist.commonAncestorOptions' doc comment for why the two services'
--- scores must never be summed together in one rollup.
-local function commonAncestorGroups(candidates)
-    local withId, withoutId = {}, {}
-    for _, r in ipairs(candidates) do
-        table.insert(r.id and withId or withoutId, r)
-    end
-    local groups = {}
-    if #withId > 0 then
-        table.insert(groups, { label = "iNaturalist", options = INaturalist.commonAncestorOptions(withId) })
-    end
-    if #withoutId > 0 then
-        table.insert(groups, { label = "Pl@ntNet", options = INaturalist.commonAncestorOptions(withoutId) })
-    end
-    return groups
-end
-
 -- iNaturalist's own vision API already gives us each candidate's taxon id,
 -- so most rows get a direct link for free. A candidate can still lack one
 -- here (a Pl@ntNet result folded in via "Also try Pl@ntNet") -- resolved
@@ -192,76 +169,38 @@ LrTasks.startAsyncTask(function()
                 end
             end
 
-            -- currentCandidates/sectionLabelForIndex/offerOtherService can
-            -- all change after one pass through the loop below, if the user
-            -- asks to also try Pl@ntNet -- see the loop comment.
-            local currentCandidates = results
-            local sectionLabelForIndex = nil
-            local offerOtherService = "Also try Pl@ntNet"
-            local wantOtherService
-
-            -- Doesn't change across "Also try Pl@ntNet" reloads, so
-            -- resolved once up front rather than inside the loop.
+            -- Doesn't change across the dialog's lifetime, resolved once
+            -- up front.
             local existingTag = KeywordWriter.findSpeciesName(photos[1])
+            local existingCounts = KeywordWriter.countExistingPhotos(results)
 
-            -- Runs at most twice: once with just iNaturalist's own results,
-            -- and again with Pl@ntNet's folded in as a second labeled
-            -- section if the user asks for it (offerOtherService is cleared
-            -- either way after that, so this can't loop a third time).
-            -- Candidates from the two services are shown side by side, not
-            -- merged/deduped -- see CandidatePicker.choose's doc comment.
-            repeat
-                local existingCounts = KeywordWriter.countExistingPhotos(currentCandidates)
-                selected, wantOtherService = CandidatePicker.choose(
-                    "Species Identification", currentCandidates, defaultIndex, hint, linksForCandidate,
-                    function(r) return existingCounts[r] end,
-                    function() return commonAncestorGroups(currentCandidates) end,
-                    offerOtherService,
-                    sectionLabelForIndex,
-                    displayPhotoPaths,
-                    INaturalist.downloadThumbnailsForCandidate,
-                    existingTag,
-                    INaturalist.resolveByName
-                )
+            -- Pl@ntNet is only fetched lazily, the first time the user
+            -- views that tab (CandidatePicker calls this at most once,
+            -- caching the result itself) -- reuses the same upload-sized
+            -- photoPaths iNaturalist's own lookup used above, not the
+            -- smaller displayPhotoPaths. The existing-photo count is
+            -- computed once, right after the fetch, rather than per row.
+            local function fetchPlantNetCandidates()
+                local result = PlantNet.identify(photoPaths)
+                local candidates = result.results
+                local counts = KeywordWriter.countExistingPhotos(candidates)
+                return candidates, function(r) return counts[r] end
+            end
 
-                if wantOtherService then
-                    offerOtherService = nil -- only one other service to try
-
-                    LrFunctionContext.callWithContext("TryPlantNet", function(innerContext)
-                        local plantNetProgress = LrDialogs.showModalProgressDialog {
-                            title = "Species Identification",
-                            caption = "Trying Pl@ntNet...",
-                            cannotCancel = true,
-                            functionContext = innerContext,
-                        }
-                        local plantNetOk, plantNetResultOrError = LrTasks.pcall(PlantNet.identify, photoPaths)
-                        plantNetProgress:done()
-
-                        if plantNetOk then
-                            local originalCount = #currentCandidates
-                            local combined = {}
-                            for _, r in ipairs(currentCandidates) do
-                                table.insert(combined, r)
-                            end
-                            for _, r in ipairs(plantNetResultOrError.results) do
-                                table.insert(combined, r)
-                            end
-                            currentCandidates = combined
-                            sectionLabelForIndex = function(i)
-                                if i == 1 then return "iNaturalist" end
-                                if i == originalCount + 1 then return "Pl@ntNet" end
-                                return nil
-                            end
-                        else
-                            LrDialogs.message(
-                                "Species Identification",
-                                "Pl@ntNet lookup failed: " .. tostring(plantNetResultOrError),
-                                "critical"
-                            )
-                        end
-                    end)
-                end
-            until not wantOtherService
+            selected = CandidatePicker.choose {
+                title = "Species Identification",
+                photoPaths = displayPhotoPaths,
+                hint = hint,
+                existingTagText = existingTag,
+                inatCandidates = results,
+                inatDefaultIndex = defaultIndex,
+                countForINatCandidate = function(r) return existingCounts[r] end,
+                linksForCandidate = linksForCandidate,
+                computeCommonAncestorFor = INaturalist.commonAncestorOptions,
+                fetchPlantNetCandidates = fetchPlantNetCandidates,
+                resolveManualEntry = INaturalist.resolveByName,
+                downloadThumbnailsForCandidate = INaturalist.downloadThumbnailsForCandidate,
+            }
 
             if selected then
                 -- Best-effort enrichment: degrades to an empty list (flat
@@ -273,11 +212,11 @@ LrTasks.startAsyncTask(function()
             end
         end
 
-        -- Only safe to clean up now -- the "Also try Pl@ntNet" path above
-        -- needs these same temp JPEGs to still exist, since it reuses them
-        -- rather than re-exporting. displayTempDir is only used by the
-        -- now-closed CandidatePicker dialog(s), so it's always safe to
-        -- clean up here regardless.
+        -- Only safe to clean up now -- CandidatePicker.choose's Pl@ntNet
+        -- tab can lazily call fetchPlantNetCandidates (reusing photoPaths
+        -- rather than re-exporting) any time before the dialog closes.
+        -- displayTempDir is only used by the now-closed CandidatePicker
+        -- dialog itself, so it's always safe to clean up here regardless.
         ExportTemp.cleanup(tempDir)
         ExportTemp.cleanup(displayTempDir)
 
