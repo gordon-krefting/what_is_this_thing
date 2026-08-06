@@ -32,33 +32,30 @@ local PLANTNET_CANDIDATE_BASE = INAT_ANCESTOR_BASE + MAX_ANCESTOR_OPTIONS_PER_TA
 local PLANTNET_ANCESTOR_BASE = PLANTNET_CANDIDATE_BASE + MAX_CANDIDATES_PER_TAB
 local MANUAL_INDEX = PLANTNET_ANCESTOR_BASE + MAX_ANCESTOR_OPTIONS_PER_TAB + 1
 
--- Fixed viewport for each tab's scrollable candidate list -- bounds the
--- dialog's height regardless of how many candidates/rollup options there
--- are. Wide enough to comfortably fit RADIO_WIDTH_IN_CHARS plus a
--- trailing link button without triggering the horizontal scrollbar in
--- the common case -- Mac auto-hides it when the content fits (per
--- scrolled_view's own SDK docs), so an occasional wider row just gets one
--- instead of being clipped.
+-- Fixed width for each tab's own column -- wide enough to comfortably fit
+-- RADIO_WIDTH_IN_CHARS plus a trailing link button. Each tab reserves a
+-- bounded number of rows (MAX_CANDIDATES_PER_TAB + MAX_ANCESTOR_OPTIONS_
+-- PER_TAB + one button, all fitting on screen without scrolling once the
+-- redesign moved to tabs -- no longer the flat, unbounded list a
+-- scrolled_view was originally added to contain), so height is left to
+-- size naturally instead of being fixed/scrolled.
 --
 -- Confirmed live (2026-08-06): at 750, a radio fixed to RADIO_WIDTH_IN_
 -- CHARS plus its trailing button came out a few pixels wider than the
 -- viewport -- content itself was fine (fully readable, nothing clipped),
--- just short on room, so this only widens the viewport rather than
+-- just short on room, so this only widens the column rather than
 -- touching the radio width again.
 local CANDIDATE_LIST_WIDTH = 900
-local CANDIDATE_LIST_HEIGHT = 500
 
 -- Every radio in the list -- regular candidates and common-ancestor
 -- rollups alike -- gets this same fixed width, so a row's link button
 -- always lands at the same x position regardless of how long that row's
 -- own label happens to be, without relying on fill_horizontal/spacer
--- stretching against a scrolled_view's declared width. Confirmed live
+-- stretching against the column's declared width. Confirmed live
 -- (2026-08-06) that the stretch approach doesn't reliably fill to the
--- viewport's actual visible width inside a scrolled_view -- it either
--- overflows (triggering an unwanted horizontal scrollbar) or, once
--- shrunk to compensate, clips content instead. A fixed width sidesteps
--- that uncertainty entirely: alignment no longer depends on how
--- scrolled_view sizes its child.
+-- column's actual width -- it either overflows or, once shrunk to
+-- compensate, clips content instead. A fixed width sidesteps that
+-- uncertainty entirely.
 --
 -- 60 was confirmed live as a safe base value (the common-ancestor rows
 -- already used it successfully before scrolling was added -- see below
@@ -544,7 +541,13 @@ function CandidatePicker.choose(options)
         -- Paging controls for when the selected candidate has more than
         -- one iNat photo (default_photo + taxon_photos -- confirmed live
         -- 2026-08-07 that a taxon can have several).
-        local inatPhotoCounterText = f:static_text { title = "", visible = false }
+        -- Fixed width up front, same reasoning as manualEntryErrorText
+        -- above -- this label's title starts empty and is only set once a
+        -- candidate's photos are downloaded, and a static_text control
+        -- doesn't grow to fit a .title set after construction, which was
+        -- confirmed live (2026-08-07) to throw off the paging row's
+        -- horizontal spacing once the real "X of Y" text finally arrived.
+        local inatPhotoCounterText = f:static_text { title = "", visible = false, width_in_chars = 8 }
         -- currentINatPaths/currentINatIndex track the CURRENTLY SELECTED
         -- CANDIDATE's own photo list -- unlike the local reference
         -- photo's fixed photoPaths (same for the whole dialog), this set
@@ -574,28 +577,27 @@ function CandidatePicker.choose(options)
             inatPhotoCounterText.visible = total > 1
             inatPrevButton.visible = total > 1
             inatNextButton.visible = total > 1
-            inatPrevButton.enabled = currentINatIndex > 1
-            inatNextButton.enabled = currentINatIndex < total
         end
 
+        -- Wrap around at both ends (4 -> 1, 1 -> 4) rather than stopping,
+        -- per the user's own request -- always enabled while visible
+        -- (total > 1), never disabled at an edge.
         inatPrevButton = f:push_button {
             title = "◀",
             visible = false,
             action = function()
-                if currentINatIndex > 1 then
-                    currentINatIndex = currentINatIndex - 1
-                    updateINatPhotoNav()
-                end
+                local total = #currentINatPaths
+                currentINatIndex = currentINatIndex > 1 and currentINatIndex - 1 or total
+                updateINatPhotoNav()
             end,
         }
         inatNextButton = f:push_button {
             title = "▶",
             visible = false,
             action = function()
-                if currentINatIndex < #currentINatPaths then
-                    currentINatIndex = currentINatIndex + 1
-                    updateINatPhotoNav()
-                end
+                local total = #currentINatPaths
+                currentINatIndex = currentINatIndex < total and currentINatIndex + 1 or 1
+                updateINatPhotoNav()
             end,
         }
 
@@ -668,31 +670,30 @@ function CandidatePicker.choose(options)
 
         if #photoPaths > 1 then
             local currentPhotoIndex = 1
-            local photoCounterText = f:static_text { title = "1 of " .. #photoPaths }
+            -- Same width_in_chars as inatPhotoCounterText below, so both
+            -- paging rows line up identically regardless of which one's
+            -- title happened to be set at construction time vs later.
+            local photoCounterText = f:static_text { title = "1 of " .. #photoPaths, width_in_chars = 8 }
             local prevPhotoButton, nextPhotoButton
             local function updatePhotoNav()
                 localPhotoView.value = photoPaths[currentPhotoIndex]
                 photoCounterText.title = tostring(currentPhotoIndex) .. " of " .. #photoPaths
-                prevPhotoButton.enabled = currentPhotoIndex > 1
-                nextPhotoButton.enabled = currentPhotoIndex < #photoPaths
             end
+            -- Wrap around at both ends (e.g. 4 -> 1, 1 -> 4) rather than
+            -- stopping, per the user's own request -- always enabled,
+            -- never disabled at an edge.
             prevPhotoButton = f:push_button {
                 title = "◀",
-                enabled = false,
                 action = function()
-                    if currentPhotoIndex > 1 then
-                        currentPhotoIndex = currentPhotoIndex - 1
-                        updatePhotoNav()
-                    end
+                    currentPhotoIndex = currentPhotoIndex > 1 and currentPhotoIndex - 1 or #photoPaths
+                    updatePhotoNav()
                 end,
             }
             nextPhotoButton = f:push_button {
                 title = "▶",
                 action = function()
-                    if currentPhotoIndex < #photoPaths then
-                        currentPhotoIndex = currentPhotoIndex + 1
-                        updatePhotoNav()
-                    end
+                    currentPhotoIndex = currentPhotoIndex < #photoPaths and currentPhotoIndex + 1 or 1
+                    updatePhotoNav()
                 end,
             }
             table.insert(leftColumnArgs, f:row { prevPhotoButton, photoCounterText, nextPhotoButton })
@@ -712,38 +713,27 @@ function CandidatePicker.choose(options)
         if existingTagText then
             table.insert(rightColumnArgs, f:static_text { title = "Currently tagged: " .. existingTagText })
         end
+        inatPanelArgs.width = CANDIDATE_LIST_WIDTH
+        plantNetPanelArgs.width = CANDIDATE_LIST_WIDTH
+        manualPanelArgs.width = CANDIDATE_LIST_WIDTH
+
         table.insert(rightColumnArgs, f:tab_view {
             value = LrView.bind("activeTab"),
             width = CANDIDATE_LIST_WIDTH,
             f:tab_view_item {
                 identifier = "inat",
                 title = "iNaturalist",
-                f:scrolled_view {
-                    width = CANDIDATE_LIST_WIDTH,
-                    height = CANDIDATE_LIST_HEIGHT,
-                    vertical_scroller = true,
-                    f:column(inatPanelArgs),
-                },
+                f:column(inatPanelArgs),
             },
             f:tab_view_item {
                 identifier = "plantnet",
                 title = "Pl@ntNet",
-                f:scrolled_view {
-                    width = CANDIDATE_LIST_WIDTH,
-                    height = CANDIDATE_LIST_HEIGHT,
-                    vertical_scroller = true,
-                    f:column(plantNetPanelArgs),
-                },
+                f:column(plantNetPanelArgs),
             },
             f:tab_view_item {
                 identifier = "manual",
                 title = "Manual Entry",
-                f:scrolled_view {
-                    width = CANDIDATE_LIST_WIDTH,
-                    height = CANDIDATE_LIST_HEIGHT,
-                    vertical_scroller = true,
-                    f:column(manualPanelArgs),
-                },
+                f:column(manualPanelArgs),
             },
         })
 
