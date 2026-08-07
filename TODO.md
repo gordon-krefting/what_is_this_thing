@@ -34,3 +34,12 @@ already have the history of what shipped and when.
   which works well -- but worth having going forward for new uploads.
   Confirmed at the same time: `captive_cultivated` and organism sex have
   no EXIF/XMP hook in iNat's importer at all -- not achievable this way.
+- Maybe pull the "Sex" annotation from iNat back into a local field during
+  Sync -- user is NOT convinced this is actually valuable, parked mainly
+  so the research isn't lost. Each observation's `annotations` array has
+  `controlled_attribute_id`/`controlled_value_id` pairs (Sex is attribute
+  id 9; values 10=Female, 11=Male, 20=Cannot Be Determined -- confirmed
+  live against iNat's own `/v1/controlled_terms` endpoint). Same shape as
+  the already-pulled `iNatQualityGrade`/`iNatSuggestedId` fields in
+  INatSync.lua. Caveat: annotations are community-editable, not exclusive
+  to the observer, same as identifications.
