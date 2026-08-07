@@ -5,6 +5,7 @@ local LrPathUtils = import 'LrPathUtils'
 
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- Splits each selected photo into its OWN separate observation -- gives
 -- every selected photo a fresh, distinct Observation ID, breaking it apart
@@ -53,6 +54,7 @@ LrTasks.startAsyncTask(function()
                 photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", nil)
                 table.insert(unlinkedPhotos, photo)
             end
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
         -- The color label (if any) reflected the OLD, now-broken link --
         -- recompute now that iNatObservationId is cleared, so a

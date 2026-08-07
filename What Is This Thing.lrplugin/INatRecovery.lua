@@ -19,6 +19,7 @@ local LrTasks = import 'LrTasks'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 local INatRecovery = {}
 
@@ -210,6 +211,7 @@ local function importOnePhoto(catalog, observation, photoEntry, destDir)
             applyCaptureDate(newPhoto, observation)
             applyCopyright(newPhoto, photoEntry)
             newPhoto:setPropertyForPlugin(_PLUGIN, "iNatRecoveredPlaceholder", "yes")
+            PendingMetadataSave.markIfNeeded(catalog, newPhoto)
         end
     end)
     return newPhoto

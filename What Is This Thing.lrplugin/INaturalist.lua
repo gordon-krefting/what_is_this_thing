@@ -421,7 +421,7 @@ function INaturalist.getMajorAncestryForCandidate(candidate)
         commonName = taxon.preferred_common_name or candidate.commonName,
         -- Prefer the freshly-resolved iNat taxon's own rank over Pl@ntNet's
         -- (which is often nil for species-level results -- see isSpecies()
-        -- in WhatIsThisAnimal.lua), for the same reason commonName prefers
+        -- in SpeciesIdentification.lua), for the same reason commonName prefers
         -- iNat: consistency with the source of truth now that we're
         -- resolving through it anyway.
         rank = taxon.rank or candidate.rank,
@@ -478,10 +478,10 @@ end
 -- different services' independently-computed, differently-calibrated
 -- confidence scores. Mixing e.g. iNaturalist and Pl@ntNet candidates into
 -- one call here would silently combine incomparable numbers into a
--- meaningless sum. Callers with more than one service's candidates on
--- screen at once (WhatIsThisAnimal.lua's "Also try Pl@ntNet" flow) must
--- call this once per service and keep the results in separate,
--- clearly-labeled groups -- never merge them into one option list.
+-- meaningless sum. CandidatePicker.lua's tabbed dialog (one tab per
+-- service) already keeps this straight structurally -- each tab's own
+-- "Find Common Ancestor" button calls this once, against just that tab's
+-- own candidates, never mixed with another tab's.
 --
 -- Earlier versions of this forced a single lowest-common-ancestor (LCA)
 -- across the *entire* candidate list -- one taxonomic outlier (e.g. a Brown

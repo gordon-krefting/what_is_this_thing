@@ -79,5 +79,6 @@ return {
         "org.krefting.whatisthisthing.observationId",
         "org.krefting.whatisthisthing.approximateLocation",
         "org.krefting.whatisthisthing.iNatRecoveredPlaceholder",
+        "org.krefting.whatisthisthing.pendingMetadataSave",
     },
 }

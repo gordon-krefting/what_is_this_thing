@@ -5,6 +5,7 @@ local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 local ObservationMerge = {}
 
@@ -103,6 +104,7 @@ function ObservationMerge.merge(master, otherPhotos)
                     local gps = photo:getRawMetadata("gps")
                     if not (gps and gps.latitude and gps.longitude) then
                         photo:setRawMetadata("gps", { latitude = masterGps.latitude, longitude = masterGps.longitude })
+                        PendingMetadataSave.markIfNeeded(catalog, photo)
                     end
                 end
             end
@@ -116,6 +118,7 @@ function ObservationMerge.merge(master, otherPhotos)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", masterINatObservationUrl)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatQualityGrade", masterINatQualityGrade)
                 photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", masterINatSuggestedId)
+                PendingMetadataSave.markIfNeeded(catalog, photo)
             end
             -- Recomputes the color label now that iNatObservationId is
             -- actually set -- applyIdentification's own color-code call

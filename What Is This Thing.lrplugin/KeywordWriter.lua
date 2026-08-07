@@ -4,6 +4,7 @@ local LrPathUtils = import 'LrPathUtils'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local TaxonStore = dofile(LrPathUtils.child(_PLUGIN.path, "TaxonStore.lua"))
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 local KeywordWriter = {}
 
@@ -252,7 +253,7 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     local catalog = LrApplication.activeCatalog()
     local caption = formatCaption(candidate)
     -- Nil rank means species by this codebase's established convention
-    -- (see isSpecies() in WhatIsThisAnimal.lua) -- normalize it here
+    -- (see isSpecies() in SpeciesIdentification.lua) -- normalize it here
     -- rather than storing an ambiguous-looking blank/"(unknown)" value
     -- for the common case.
     local rankValue = candidate.rank or "species"
@@ -300,6 +301,8 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
                     end
                 end
             end
+
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
 
         -- Keeps the color label current the moment a photo is identified

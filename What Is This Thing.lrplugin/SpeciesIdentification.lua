@@ -78,7 +78,7 @@ LrTasks.startAsyncTask(function()
         return
     end
 
-    LrFunctionContext.callWithContext("WhatIsThisAnimalLookup", function(context)
+    LrFunctionContext.callWithContext("SpeciesIdentificationLookup", function(context)
         local progressScope = LrDialogs.showModalProgressDialog {
             title = "Species Identification",
             caption = "Exporting photos...",

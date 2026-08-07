@@ -5,6 +5,7 @@ local LrPathUtils = import 'LrPathUtils'
 local LrProgressScope = import 'LrProgressScope'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
 -- as a plain string (unlike get/setPropertyForPlugin, which also accept
@@ -100,6 +101,7 @@ LrTasks.startAsyncTask(function()
             speciesCount = speciesCount + 1
             for _, photo in ipairs(bySpecies[name].photos) do
                 photo:setPropertyForPlugin(_PLUGIN, "taxonId", taxonId)
+                PendingMetadataSave.markIfNeeded(catalog, photo)
                 photoCount = photoCount + 1
             end
         end

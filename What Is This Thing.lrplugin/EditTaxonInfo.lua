@@ -7,6 +7,7 @@ local LrFunctionContext = import 'LrFunctionContext'
 local LrPathUtils = import 'LrPathUtils'
 
 local TaxonStore = dofile(LrPathUtils.child(_PLUGIN.path, "TaxonStore.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
 -- as a plain string (unlike get/setPropertyForPlugin, which also accept
@@ -110,6 +111,7 @@ LrTasks.startAsyncTask(function()
         for _, photo in ipairs(targetPhotos) do
             photo:setPropertyForPlugin(_PLUGIN, "growthHabit", growthHabitValue)
             photo:setPropertyForPlugin(_PLUGIN, "notes", notesValue)
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
     end)
 end)

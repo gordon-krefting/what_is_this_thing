@@ -11,6 +11,7 @@ local LrTasks = import 'LrTasks'
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
 -- as a plain string (unlike get/setPropertyForPlugin, which also accept
@@ -1021,6 +1022,7 @@ function INatSync.applyMatch(group, observation, username, lastSyncAt, photosByF
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", observationUrl)
             photo:setPropertyForPlugin(_PLUGIN, "iNatQualityGrade", observation.quality_grade)
             photo:setPropertyForPlugin(_PLUGIN, "iNatSuggestedId", suggestedId)
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
         -- Keeps the color label current every time sync touches a group --
         -- covers plain quality-grade changes (e.g. Needs ID -> Research

@@ -4,6 +4,7 @@ local LrTasks = import 'LrTasks'
 local LrPathUtils = import 'LrPathUtils'
 
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- catalog:findPhotosWithProperty requires the plug-in's toolkit identifier
 -- as a plain string (unlike get/setPropertyForPlugin, which also accept
@@ -42,6 +43,9 @@ LrTasks.startAsyncTask(function()
     local purpleCount, blueCount, greenCount = 0, 0, 0
     catalog:withWriteAccessDo("Color code identifications", function()
         purpleCount, blueCount, greenCount = ColorCode.applyToPhotos(allTagged)
+        for _, photo in ipairs(allTagged) do
+            PendingMetadataSave.markIfNeeded(catalog, photo)
+        end
     end)
 
     LrDialogs.message(

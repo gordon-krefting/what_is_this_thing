@@ -10,6 +10,7 @@ local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
 local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 local ColorCode = dofile(LrPathUtils.child(_PLUGIN.path, "ColorCode.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- Explicit override: point the selected photo(s) at a SPECIFIC iNat
 -- observation, chosen by the user, bypassing the sync's own automatic
@@ -165,6 +166,7 @@ LrTasks.startAsyncTask(function()
             photo:setPropertyForPlugin(_PLUGIN, "observationId", freshObservationId)
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationId", tostring(observationId))
             photo:setPropertyForPlugin(_PLUGIN, "iNatObservationUrl", observationUrl)
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
         -- Recomputes the color label now that iNatObservationId is
         -- actually set -- applyIdentification's own color-code call above

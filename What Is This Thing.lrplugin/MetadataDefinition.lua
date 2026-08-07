@@ -174,6 +174,37 @@ return {
             },
         },
         {
+            id = "pendingMetadataSave",
+            title = "Pending Metadata Save",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Set by PendingMetadataSave.markIfNeeded whenever a plugin
+            -- command writes metadata to a photo while its file isn't
+            -- currently reachable on disk (e.g. an unmounted archive
+            -- drive) -- Lightroom's catalog write still succeeds, but it
+            -- never gets flushed to the actual file/XMP sidecar until
+            -- something explicitly saves it, and there's no reliable
+            -- native way to find these later (Lightroom's own "Metadata
+            -- Status" Smart Collection criterion is a confirmed Lightroom
+            -- Classic bug; "Edit Date" doesn't work either, since Save
+            -- Metadata to Files itself bumps it). Every flagged photo is
+            -- ALSO kept in sync with membership in a "Pending Metadata
+            -- Save" collection (see PendingMetadataSave.lua) -- that
+            -- collection, not this field directly, is the actual
+            -- workflow: open it, select what's there, Metadata > Save
+            -- Metadata to Files, then remove them from the collection (or
+            -- delete it) once satisfied. This field exists alongside it
+            -- for Metadata-panel visibility/searchability. Same nil/"yes"
+            -- enum shape as approximateLocation/iNatRecoveredPlaceholder
+            -- above, for the same reason.
+            values = {
+                { value = nil, title = "No" },
+                { value = "yes", title = "Yes" },
+            },
+            readOnly = true,
+        },
+        {
             id = "observationId",
             title = "Observation ID",
             dataType = "string",

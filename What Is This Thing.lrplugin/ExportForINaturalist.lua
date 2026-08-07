@@ -9,6 +9,7 @@ local LrFileUtils = import 'LrFileUtils'
 local LrView = import 'LrView'
 
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 -- Prompts for (or reuses a saved) destination folder, with an easy way to
 -- switch to a different one. Returns the folder path, or nil if the user
@@ -81,6 +82,7 @@ local function exportWithSimplifiedMetadata(photo, destFolder)
             photo:removeKeyword(kw)
         end
         photo:setRawMetadata("caption", "")
+        PendingMetadataSave.markIfNeeded(catalog, photo)
     end)
 
     local exportOk, exportErr = LrTasks.pcall(function()
@@ -115,6 +117,7 @@ local function exportWithSimplifiedMetadata(photo, destFolder)
             photo:addKeyword(kw)
         end
         photo:setRawMetadata("caption", originalCaption or "")
+        PendingMetadataSave.markIfNeeded(catalog, photo)
     end)
 
     if not exportOk then

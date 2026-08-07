@@ -10,7 +10,7 @@ return {
     LrExportMenuItems = {
         {
             title = "Species Identification",
-            file = "WhatIsThisAnimal.lua",
+            file = "SpeciesIdentification.lua",
         },
         {
             title = "Export for iNaturalist",

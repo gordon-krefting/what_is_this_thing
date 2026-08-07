@@ -10,6 +10,7 @@ local LrTasks = import 'LrTasks'
 
 local HomeLocation = dofile(LrPathUtils.child(_PLUGIN.path, "HomeLocation.lua"))
 local JSON = dofile(LrPathUtils.child(_PLUGIN.path, "JSON.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
 
 local GpsPrompt = {}
 
@@ -330,6 +331,7 @@ function GpsPrompt.ensureGpsOnAllPhotos(photos, reasonText)
             if isApproximate then
                 photo:setPropertyForPlugin(_PLUGIN, "approximateLocation", "yes")
             end
+            PendingMetadataSave.markIfNeeded(catalog, photo)
         end
     end)
 

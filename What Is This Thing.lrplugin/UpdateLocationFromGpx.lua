@@ -5,12 +5,21 @@ local LrPathUtils = import 'LrPathUtils'
 local LrFileUtils = import 'LrFileUtils'
 local LrFunctionContext = import 'LrFunctionContext'
 
--- All the actual logic (finding the GPX file, running exiftool, parsing
--- its output into a summary) lives in geotag_from_gpx.py, specifically so
--- it can be tested directly from a terminal without needing to reload the
--- plugin or click through Lightroom's UI. This file is just the glue: get
--- the target photos' paths (only Lightroom's catalog knows that), run the
--- script, show whatever it printed.
+local JSON = dofile(LrPathUtils.child(_PLUGIN.path, "JSON.lua"))
+local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetadataSave.lua"))
+
+-- geotag_from_gpx.py only ever COMPUTES coordinates now (reading each
+-- real photo's own DateTimeOriginal tag, same as before, but matching
+-- against a disposable proxy file rather than writing into the real
+-- file at all -- see that script's own doc comment) -- so this file
+-- applies the result itself, through Lightroom's own catalog
+-- (photo:setRawMetadata), the same single write path every other
+-- command in this plugin already uses. That eliminates a real dual-
+-- writer race that existed when exiftool wrote straight to the file:
+-- a photo with pending, not-yet-flushed catalog metadata could have
+-- that silently discarded by a later Save Metadata to Files, since the
+-- catalog never learned about exiftool's own direct write. See
+-- DEVELOPMENT_NOTES.md.
 local SCRIPT_PATH = LrPathUtils.child(_PLUGIN.path, "geotag_from_gpx.py")
 
 local function shellQuote(path)
@@ -29,14 +38,20 @@ LrTasks.startAsyncTask(function()
     LrFunctionContext.callWithContext("UpdateLocationFromGpx", function(context)
         local progressScope = LrDialogs.showModalProgressDialog {
             title = "Update Location from GPX",
-            caption = "Running exiftool...",
+            caption = "Computing matches from GPX track...",
             cannotCancel = true,
             functionContext = context,
         }
 
+        -- photoForPath assumes distinct paths across the selection, true
+        -- for any real Lightroom selection (two catalog entries can't
+        -- share one file path).
         local paths = {}
+        local photoForPath = {}
         for _, photo in ipairs(photos) do
-            table.insert(paths, photo:getRawMetadata("path"))
+            local path = photo:getRawMetadata("path")
+            table.insert(paths, path)
+            photoForPath[path] = photo
         end
 
         local outputFile = LrPathUtils.child(
@@ -67,15 +82,38 @@ LrTasks.startAsyncTask(function()
 
         progressScope:done()
 
-        -- exiftool writes straight to the file, and there's no reliable way
-        -- for a plugin to refresh Lightroom's own metadata cache for it, so
-        -- the user has to trigger that manually -- but only worth mentioning
-        -- if exiftool actually changed anything.
-        local updatedCount = tonumber(output:match("Updated:%s*(%d+)"))
-        if updatedCount and updatedCount > 0 then
-            output = output .. "\nTo see the new GPS data in Lightroom, select the photos and choose Metadata > Read Metadata from Files."
+        local ok, decoded = pcall(JSON.decode, output)
+        if not ok or not decoded then
+            LrDialogs.message("Update Location from GPX", "Couldn't parse the script's output:\n\n" .. output, "critical")
+            return
+        end
+        if decoded.error then
+            LrDialogs.message("Update Location from GPX", decoded.error, "critical")
+            return
         end
 
-        LrDialogs.message("Update Location from GPX", output, "info")
+        local matchedCount, unmatchedByReason = 0, {}
+        catalog:withWriteAccessDo("Update location from GPX", function()
+            for _, result in ipairs(decoded.results or {}) do
+                local photo = photoForPath[result.path]
+                if photo then
+                    if result.latitude and result.longitude then
+                        photo:setRawMetadata("gps", { latitude = result.latitude, longitude = result.longitude })
+                        PendingMetadataSave.markIfNeeded(catalog, photo)
+                        matchedCount = matchedCount + 1
+                    else
+                        local reason = result.reason or "no match"
+                        unmatchedByReason[reason] = (unmatchedByReason[reason] or 0) + 1
+                    end
+                end
+            end
+        end)
+
+        local summary = string.format("Updated: %d photo(s)", matchedCount)
+        for reason, count in pairs(unmatchedByReason) do
+            summary = summary .. string.format("\n%d photo(s): %s", count, reason)
+        end
+
+        LrDialogs.message("Update Location from GPX", summary, "info")
     end)
 end)
