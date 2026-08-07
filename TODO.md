@@ -19,6 +19,3 @@ already have the history of what shipped and when.
 - Graceful degradation when the external archive drive isn't mounted
 - Trim the one-off diagnostics (e.g. `logClaim`/`inat-sync-claim-trace.log`,
   no longer needed since the species-first sync redesign)
-- Look at finding GPS info from "adjacent" photos in the same folder (for
-  a photo missing GPS, borrow it from a nearby-in-time photo in the same
-  folder that has it -- likely relevant to `GpsPrompt.lua`)
