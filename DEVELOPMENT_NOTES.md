@@ -3220,6 +3220,39 @@ selection is current, plus both pagers' wraparound.
 Confirmed working live by the user for both the initial redesign and the
 follow-up fixes before committing (`b999551`, `34d03a0`).
 
+## Pending metadata save tracking, via a persistent collection (2026-08-07)
+
+A photo edited while its file isn't reachable (e.g. an unmounted
+external archive drive) still writes fine to Lightroom's own catalog,
+but that write never reaches the actual file/XMP sidecar until
+something flushes it, and nothing does that automatically if the file
+wasn't reachable at edit time. Lightroom's own "Metadata Status" Smart
+Collection criterion is a confirmed Lightroom Classic bug (status flips
+just from viewing a photo, doesn't clear after Save Metadata to Files,
+gets permanently stuck), and "Edit Date" doesn't work either -- Save
+Metadata to Files itself was confirmed live to bump a photo's Edit
+Date, making it self-defeating as a narrowing signal.
+
+Added `PendingMetadataSave.lua`, wired into all 14 metadata-write sites
+across the plugin. `markIfNeeded(catalog, photo)` flags a photo (new
+"Pending Metadata Save" custom field) and keeps it in sync with
+membership in a persistent "Pending Metadata Save" collection whenever
+its file isn't reachable, clearing both automatically once a later
+write finds it reachable again. The collection -- not an ephemeral
+catalog selection -- is the actual workflow: open it, select what's
+there, Save Metadata to Files, then remove them from the collection (or
+delete it). An earlier version of this drove `catalog:setSelectedPhotos`
+with an optimistic clear-on-select; replaced after live use showed a
+lost selection could silently drop a photo from tracking with nothing
+ever having been saved.
+
+Confirmed live end-to-end (2026-08-07, committed as `fb9d6e8`): ran
+several commands with the archive drive unmounted, confirmed the
+affected photos landed in the "Pending Metadata Save" collection,
+remounted the drive, selected the collection's contents, ran Metadata >
+Save Metadata to Files, then removed them from the collection -- the
+whole loop worked as designed.
+
 ## Explicitly deferred / still open
 
 - **Cursor-orphaned observations have no *general* recheck mechanism** --
