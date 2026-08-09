@@ -13,6 +13,19 @@ local KeywordWriter = {}
 -- if-blocks so it's one place to update if a field gets added/removed.
 local TAXON_LEVEL_FIELDS = { "conservationStatus", "establishmentMeans", "growthHabit", "wikipediaUrl", "notes" }
 
+-- Every custom field that makes up a photo's identification -- everything
+-- clearIdentification below wipes. Deliberately excludes
+-- approximateLocation/iNatRecoveredPlaceholder/pendingMetadataSave --
+-- those are operational/provenance facts about the photo (GPS-approximation
+-- flag, recovered-placeholder origin, pending-save tracking), not part of
+-- what species it's identified as, and stay valid independent of whether
+-- the identification itself was ever correct.
+local IDENTIFICATION_FIELDS = {
+    "scientificName", "commonName", "taxonRank", "taxonId", "taxonUrl", "idConfidence", "cultivar", "observationId",
+    "iNatObservationId", "iNatObservationUrl", "iNatQualityGrade", "iNatSuggestedId",
+    "conservationStatus", "establishmentMeans", "growthHabit", "wikipediaUrl", "notes",
+}
+
 -- All species-ID keywords are nested under this parent (not itself included
 -- on export) so a re-ID can reliably find and remove the *old* leaf keyword
 -- without touching any keywords the user added by hand elsewhere.
@@ -151,6 +164,31 @@ local function removeOldChildKeywords(photo, parentKeyword, exceptKeyword)
         end
     end
     return alreadyHasNew
+end
+
+-- Fully reverses applyIdentification -- for a photo whose identification
+-- turned out to be flat-out wrong (not just mis-grouped with a real
+-- neighbor -- see SplitObservation.lua for that narrower case, which
+-- only detaches grouping/clears the iNat link, not the species ID
+-- itself). Removes any keyword nested under "Species ID" (exceptKeyword
+-- = nil clears all of them, not just the old one being replaced), clears
+-- Title/Caption back to unset, and clears every IDENTIFICATION_FIELDS
+-- custom property. Exported for ClearIdentification.lua.
+--
+-- Caller must already be inside a catalog:withWriteAccessDo block (same
+-- convention as applyIdentification's own per-photo work below).
+function KeywordWriter.clearIdentification(photo)
+    local parentKeyword = findParentKeyword(LrApplication.activeCatalog())
+    if parentKeyword then
+        removeOldChildKeywords(photo, parentKeyword, nil)
+    end
+
+    photo:setRawMetadata("title", nil)
+    photo:setRawMetadata("caption", nil)
+
+    for _, field in ipairs(IDENTIFICATION_FIELDS) do
+        photo:setPropertyForPlugin(_PLUGIN, field, nil)
+    end
 end
 
 -- Builds (or reuses) a chain of keywords under `parentKeyword`, one per

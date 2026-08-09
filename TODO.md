@@ -7,6 +7,14 @@ this file is the answer -- not memory, not conversation history.
 Completed items are deleted, not checked off -- `git log`/`DEVELOPMENT_NOTES.md`
 already have the history of what shipped and when.
 
+- Add a "Manage Observation" menu item/dialog consolidating per-observation
+  actions that currently live as separate commands -- "Drop Photo" (remove
+  a photo from its observation/group), "Set Cultivar", etc. Details TBD.
+  Prompted (2026-08-09) by the Review iNat Links / Clear Identification
+  work -- reviewing ~10 real bad links surfaced how many small,
+  related per-observation operations are currently scattered across
+  separate menu items (SplitObservation.lua, SetCultivar.lua,
+  ClearIdentification.lua, SetINatObservation.lua) rather than one place.
 - Fold PlantBook into this project (2026-08-09, per the user -- leaning
   toward dropping the PlantBook plugin entirely, rebuilding its
   functionality here, single repo/single LRC plugin for all personal

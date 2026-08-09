@@ -33,6 +33,10 @@ return {
             file = "SplitObservation.lua",
         },
         {
+            title = "Clear Identification",
+            file = "ClearIdentification.lua",
+        },
+        {
             title = "Merge Observation",
             file = "MergeObservation.lua",
         },
