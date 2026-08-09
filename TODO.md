@@ -7,8 +7,42 @@ this file is the answer -- not memory, not conversation history.
 Completed items are deleted, not checked off -- `git log`/`DEVELOPMENT_NOTES.md`
 already have the history of what shipped and when.
 
-- Bound unbounded log growth (`inat-sync-log.txt`,
-  `inat-sync-claim-trace.log`, `inat-recovery-log.txt`)
+- Reorganize plugin data files + verify/ensure backup coverage --
+  everything currently dumps into one folder
+  (`~/Photos/local/WhatIsThisThing/`): 2 unbounded logs
+  (`inat-sync-log.txt` 676KB, `inat-sync-claim-trace.log` 302KB, both
+  actively growing), 2 orphaned files nobody writes anymore
+  (`inat-recovery-log.txt`, `inat-sync-mismatches.html` -- confirmed no
+  code references either, safe to just delete), 2 regeneratable reports
+  (`inat-sync-needs-attention.html`, `observation-report.html`), and 1
+  piece of real master data (`taxon-data.lua`, TaxonStore.lua's cache of
+  iNat taxon facts -- expensive to rebuild, not something to lose).
+  Mixing disposable/regeneratable/master data in one location is the
+  actual problem -- makes it hard to apply a sensible backup policy per
+  category. Plan:
+  - Consolidate the 2 active logs into a single log file -- and check
+    whether `inat-sync-claim-trace.log` (`logClaim` in `INatSync.lua`)
+    is even still needed at all, not just worth merging: it was built to
+    diagnose a cross-species "already claimed" bug that the species-first
+    sync redesign (2026-07-31) may have already fixed structurally.
+  - Prefer writing to that log over showing a dialog full of data, where
+    reasonable (fewer interruptions for diagnostic-only info).
+  - Split logs (disposable) / reports (regeneratable) / taxon-data.lua
+    (master, must be backed up) into distinct locations so each can have
+    its own retention/backup treatment instead of living together by
+    accident.
+  - Delete the 2 confirmed-orphaned files.
+  - `taxon-data.lua`'s current location was deliberately chosen (per
+    TaxonStore.lua's own comment) because `manage_photo_backups.rb`'s
+    `LOCAL_SOURCE` already sweeps `~/Photos/local/` wholesale -- verify
+    live that it's actually landing on the NAS/Backblaze, not just
+    assumed covered, before restructuring anything (a relocation that
+    isn't itself re-verified against the backup script could
+    accidentally make coverage worse, not better).
+  - Related, not yet decided: whether `manage_photo_backups.rb` itself
+    (currently in `~/bin`, its own separate thing) gets folded into this
+    repo as part of a broader single-repo photo-management consolidation
+    -- see the PlantBook discussion.
 - Add a way to refresh iNat taxonomy for local-only observations (never
   uploaded to iNat)
 - Design an iPhone -> Lightroom workflow for all photos (not just iNat
@@ -17,8 +51,6 @@ already have the history of what shipped and when.
   to the ID-process redo)
 - Design a report with info about local observations (spec TBD)
 - Graceful degradation when the external archive drive isn't mounted
-- Trim the one-off diagnostics (e.g. `logClaim`/`inat-sync-claim-trace.log`,
-  no longer needed since the species-first sync redesign)
 - Write GPS accuracy into exported photos for approximate locations --
   iNat's importer reads the EXIF `GPSHPositioningError` tag straight into
   the observation's `positional_accuracy` (confirmed directly from
