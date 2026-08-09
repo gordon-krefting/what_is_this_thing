@@ -114,6 +114,23 @@ return {
             -- lookup.
         },
         {
+            id = "taxonUrl",
+            title = "iNat Taxon Page",
+            dataType = "url",
+            searchable = true,
+            readOnly = true,
+            -- Clickable link to the taxon's own iNat page (not a specific
+            -- observation -- doesn't need one to exist). Same clickable-
+            -- link pattern as iNatObservationUrl/wikipediaUrl below.
+            -- Written by KeywordWriter.applyIdentification alongside
+            -- taxonId, purely computed from it
+            -- ("https://www.inaturalist.org/taxa/" .. taxonId) -- no
+            -- separate API call needed. Added 2026-08-09; photos
+            -- identified before this existed were backfilled via a
+            -- one-off script, since removed (same throwaway-migration-
+            -- tool pattern as BackfillTaxonId.lua).
+        },
+        {
             id = "idConfidence",
             title = "ID Confidence",
             dataType = "string",

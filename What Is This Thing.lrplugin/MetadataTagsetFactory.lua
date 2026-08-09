@@ -59,6 +59,7 @@ return {
         "org.krefting.whatisthisthing.commonName",
         "org.krefting.whatisthisthing.taxonRank",
         "org.krefting.whatisthisthing.taxonId",
+        "org.krefting.whatisthisthing.taxonUrl",
         "org.krefting.whatisthisthing.idConfidence",
         "org.krefting.whatisthisthing.cultivar",
 
