@@ -54,7 +54,6 @@ already have the history of what shipped and when.
   observations)
 - Show local + iNat observation counts for the selected species (deferred
   to the ID-process redo)
-- Design a report with info about local observations (spec TBD)
 - Graceful degradation when the external archive drive isn't mounted
 - Write GPS accuracy into exported photos for approximate locations --
   iNat's importer reads the EXIF `GPSHPositioningError` tag straight into
@@ -71,6 +70,16 @@ already have the history of what shipped and when.
   which works well -- but worth having going forward for new uploads.
   Confirmed at the same time: `captive_cultivated` and organism sex have
   no EXIF/XMP hook in iNat's importer at all -- not achievable this way.
+- Add a way to find observations with an unresponded community ID
+  suggestion. `INatSync.lua`'s `describeUnrespondedSuggestion` already
+  computes this per observation during Sync -- someone else's current
+  identification disagrees with the owner's own latest one -- and stores
+  the result on each photo as `iNatSuggestedId`, but it's currently only
+  ever surfaced as a one-off "iNaturalist Data Changed" notice at the
+  moment of that sync run (`INatSyncRunner.lua`'s `showFieldChangeNotice`)
+  -- there's no way to come back later and find/select every photo
+  currently carrying one. Likely the same `catalog:findPhotosWithProperty`
+  + select pattern already used by `SelectPendingMetadataSave.lua`.
 - Maybe pull the "Sex" annotation from iNat back into a local field during
   Sync -- user is NOT convinced this is actually valuable, parked mainly
   so the research isn't lost. Each observation's `annotations` array has
