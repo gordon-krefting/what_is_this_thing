@@ -43,6 +43,59 @@ already have the history of what shipped and when.
     (currently in `~/bin`, its own separate thing) gets folded into this
     repo as part of a broader single-repo photo-management consolidation
     -- see the PlantBook discussion.
+  - Design this WITH PlantBook's own file types in mind, not just What Is
+    This Thing's current ones (2026-08-09, per the user -- wants
+    consistency across both rather than solving this narrowly then
+    redoing it once PlantBook folds in). PlantBook writes its own kind of
+    generatable HTML output too (`public_html/`, the published plant-
+    guide site, analogous to but distinct from this project's own
+    `observation-report.html`/`inat-sync-needs-attention.html`), plus its
+    own logging -- confirmed live (2026-08-09) that PlantBook's plugin
+    actually uses Lightroom's own `LrLogger` facility (writes to the SDK-
+    standard `~/Documents/LrClassicLogs/PlantBookPlugin.log`), NOT a
+    hand-rolled `io.open` file log like this project's `inat-sync-log.txt`
+    -- a real mechanism difference, not just a location one, to reconcile
+    before settling on one approach.
+- Fold PlantBook into this project (2026-08-09, per the user -- leaning
+  toward dropping the PlantBook plugin entirely, rebuilding its
+  functionality here, single repo/single LRC plugin for all personal
+  photo-management code, since they're the only user and the two-plugin
+  overhead isn't earning its keep). Real scope, not a quick copy job --
+  see the full discussion for details, summarized:
+  - Data migration: PlantBook's custom metadata lives under a different
+    toolkit id (`org.krefting.plant-book` vs
+    `org.krefting.whatisthisthing`) -- a one-time script (same throwaway-
+    migration-tool pattern as `BackfillTaxonId.lua`) needs to read each
+    photo's `org.krefting.plant-book.*` properties and rewrite them as
+    `org.krefting.whatisthisthing.*`.
+  - Schema alignment found so far: `plantType` (PlantBook, already a
+    real enum) vs `growthHabit` (this project, string, has its own open
+    "convert to enum" history) are the same concept -- PlantBook's enum
+    is the more useful starting point. `nativity` (PlantBook, hand-set
+    enum) vs `establishmentMeans` (this project, auto-pulled from iNat)
+    are the same concept sourced differently -- needs a decision on which
+    model wins. `notes` is the same field name in both but different
+    *mechanism*: this project enforces species-level consistency
+    proactively via `TaxonStore.lua` (one edit fans out to every photo of
+    that species); PlantBook allows per-photo divergence and reconciles/
+    flags conflicts reactively at site-build time in `book_formatter.py`
+    -- worth deciding which model to keep. `idConfidence` is a NAME
+    collision, not a real overlap -- PlantBook's is a hand-set subjective
+    enum (?/??/???), this project's is a computed percentage string --
+    don't conflate them. PlantBook has no `cultivar` field at all despite
+    being garden-focused; this project already does.
+  - `PublishServiceProvider.lua` is a Lightroom *publish service*
+    (`LrExportServiceProvider`) -- a bigger, different SDK surface than
+    anything this plugin currently registers (just export-menu
+    commands) -- porting the "export changed photos + thumbnails + dump
+    JSON + shell out to the site generator" flow is real new scope.
+  - `book_formatter/` is a separate Python/Poetry app (reads
+    `PhotoBook.json`, renders Jinja2, rsyncs to the remote host) --
+    needs a decision on where it lives structurally in a merged repo.
+  - krefting.org/plantguide is a live site -- needs a cutover sequence
+    that doesn't take it down mid-migration, not a rewrite-and-hope.
+  - See also the file-locations item above -- do this with PlantBook's
+    own logging/HTML-output patterns in mind, not just this project's.
 - Add a way to refresh iNat taxonomy for local-only observations (never
   uploaded to iNat)
 - Design an iPhone -> Lightroom workflow for all photos (not just iNat
