@@ -172,8 +172,12 @@ end
 -- only detaches grouping/clears the iNat link, not the species ID
 -- itself). Removes any keyword nested under "Species ID" (exceptKeyword
 -- = nil clears all of them, not just the old one being replaced), clears
--- Title/Caption back to unset, and clears every IDENTIFICATION_FIELDS
--- custom property. Exported for ClearIdentification.lua.
+-- Title/Caption back to unset, clears every IDENTIFICATION_FIELDS custom
+-- property, and clears the color label -- ColorCode.applyToPhotos only
+-- ever SETS purple/blue/green (see its own doc comment), so without this
+-- a cleared photo would keep whatever color it was stamped with before,
+-- now stale and misleading (confirmed live 2026-08-09). Exported for
+-- ClearIdentification.lua.
 --
 -- Caller must already be inside a catalog:withWriteAccessDo block (same
 -- convention as applyIdentification's own per-photo work below).
@@ -185,6 +189,7 @@ function KeywordWriter.clearIdentification(photo)
 
     photo:setRawMetadata("title", nil)
     photo:setRawMetadata("caption", nil)
+    photo:setRawMetadata("colorNameForLabel", nil)
 
     for _, field in ipairs(IDENTIFICATION_FIELDS) do
         photo:setPropertyForPlugin(_PLUGIN, field, nil)
