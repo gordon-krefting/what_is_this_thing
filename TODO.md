@@ -23,10 +23,22 @@ already have the history of what shipped and when.
 
   Revised categories (2026-08-09, per the user):
   - **Reports are NOT disposable** -- reclassified after the user noted
-    they might point a webserver at them eventually. Stay under the
-    backed-up `~/Photos/local/WhatIsThisThing/` tree alongside
-    `taxon-data.lua`, not moved out. Only the logs are genuinely
-    throwaway/regenerable-by-rerunning.
+    they might point a webserver at them eventually. Move to a NEW
+    dedicated location, `~/Photos/output/reports` (2026-08-09, per the
+    user) -- a 5th top-level `~/Photos/` category alongside the 4 already
+    named in `manage_photo_backups.rb`'s own comment block (import/local/
+    catalog/archive), for "generated output artifacts" specifically, kept
+    separate from `~/Photos/local/` (which is about mastered PHOTO files,
+    not app-generated data -- taxon-data.lua and reports were both a bit
+    of a stretch living there). `taxon-data.lua` itself stays put in
+    `~/Photos/local/WhatIsThisThing/` -- no reason to touch what's
+    already confirmed working. Only the logs are genuinely throwaway/
+    regenerable-by-rerunning.
+  - Since `~/Photos/output/` is a brand new location, it isn't covered by
+    any existing `manage_photo_backups.rb` source -- needs a new
+    `OUTPUT_SOURCE`/`OUTPUT_BACKUP` pair (and menu option, or folded into
+    "Backup Everything") added to the script, or reports silently stop
+    being backed up at all despite being reclassified as worth keeping.
   - **"Single log" is only achievable per-runtime, not universally** --
     Python (PlantBook's `book_formatter/`, once folded in) can't call
     `LrLogger` at all, so it will always need its own separate log file
@@ -58,9 +70,6 @@ already have the history of what shipped and when.
   - Prefer writing to that log over showing a dialog full of data, where
     reasonable (fewer interruptions for diagnostic-only info).
   - Delete the 2 confirmed-orphaned files.
-  - Reports + `taxon-data.lua` stay under `~/Photos/local/WhatIsThisThing/`
-    -- maybe split into `data/`/`reports/` subfolders for clarity, since
-    that's now purely organizational (both stay backed up either way).
   - Related, not yet decided: whether `manage_photo_backups.rb` itself
     (currently in `~/bin`, its own separate thing) gets folded into this
     repo as part of a broader single-repo photo-management consolidation
