@@ -22,23 +22,22 @@ already have the history of what shipped and when.
   expensive to rebuild, not something to lose).
 
   Revised categories (2026-08-09, per the user):
-  - **Reports are NOT disposable** -- reclassified after the user noted
-    they might point a webserver at them eventually. Move to a NEW
-    dedicated location, `~/Photos/output/reports` (2026-08-09, per the
-    user) -- a 5th top-level `~/Photos/` category alongside the 4 already
-    named in `manage_photo_backups.rb`'s own comment block (import/local/
-    catalog/archive), for "generated output artifacts" specifically, kept
-    separate from `~/Photos/local/` (which is about mastered PHOTO files,
-    not app-generated data -- taxon-data.lua and reports were both a bit
-    of a stretch living there). `taxon-data.lua` itself stays put in
-    `~/Photos/local/WhatIsThisThing/` -- no reason to touch what's
-    already confirmed working. Only the logs are genuinely throwaway/
-    regenerable-by-rerunning.
-  - Since `~/Photos/output/` is a brand new location, it isn't covered by
-    any existing `manage_photo_backups.rb` source -- needs a new
-    `OUTPUT_SOURCE`/`OUTPUT_BACKUP` pair (and menu option, or folded into
-    "Backup Everything") added to the script, or reports silently stop
-    being backed up at all despite being reclassified as worth keeping.
+  - **Reports don't need backup after all** -- even though they might get
+    served eventually, the user's settled view is losing them is fine
+    since they'd just rebuild them (regeneration is cheap/acceptable, not
+    something worth protecting). Move to a NEW dedicated location,
+    `~/Photos/output/reports` -- a 5th top-level `~/Photos/` category
+    alongside the 4 already named in `manage_photo_backups.rb`'s own
+    comment block (import/local/catalog/archive), for "generated output
+    artifacts" specifically, kept separate from `~/Photos/local/` (which
+    is about mastered PHOTO files, not app-generated data). Deliberately
+    NOT added to `manage_photo_backups.rb` -- `~/Photos/output/` should
+    stay outside every existing backup source on purpose. `taxon-data.lua`
+    itself stays put in `~/Photos/local/WhatIsThisThing/` -- no reason to
+    touch what's already confirmed working. So logs AND reports both end
+    up outside backup coverage, just in different locations (LrLogger's
+    standard path vs. `~/Photos/output/reports`) -- only `taxon-data.lua`
+    remains something actually worth protecting.
   - **"Single log" is only achievable per-runtime, not universally** --
     Python (PlantBook's `book_formatter/`, once folded in) can't call
     `LrLogger` at all, so it will always need its own separate log file
