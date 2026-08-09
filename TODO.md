@@ -7,55 +7,64 @@ this file is the answer -- not memory, not conversation history.
 Completed items are deleted, not checked off -- `git log`/`DEVELOPMENT_NOTES.md`
 already have the history of what shipped and when.
 
-- Reorganize plugin data files + verify/ensure backup coverage --
-  everything currently dumps into one folder
-  (`~/Photos/local/WhatIsThisThing/`): 2 unbounded logs
+- Reorganize plugin data files + verify/ensure backup coverage.
+  Confirmed live (2026-08-09): `taxon-data.lua` IS already landing on the
+  NAS/Backblaze as intended -- but so are the logs and HTML reports,
+  since everything currently dumps into one swept folder
+  (`~/Photos/local/WhatIsThisThing/`) with no way for the backup script
+  to tell them apart. Current contents: 2 unbounded logs
   (`inat-sync-log.txt` 676KB, `inat-sync-claim-trace.log` 302KB, both
   actively growing), 2 orphaned files nobody writes anymore
   (`inat-recovery-log.txt`, `inat-sync-mismatches.html` -- confirmed no
-  code references either, safe to just delete), 2 regeneratable reports
-  (`inat-sync-needs-attention.html`, `observation-report.html`), and 1
-  piece of real master data (`taxon-data.lua`, TaxonStore.lua's cache of
-  iNat taxon facts -- expensive to rebuild, not something to lose).
-  Mixing disposable/regeneratable/master data in one location is the
-  actual problem -- makes it hard to apply a sensible backup policy per
-  category. Plan:
-  - Consolidate the 2 active logs into a single log file -- and check
-    whether `inat-sync-claim-trace.log` (`logClaim` in `INatSync.lua`)
-    is even still needed at all, not just worth merging: it was built to
-    diagnose a cross-species "already claimed" bug that the species-first
-    sync redesign (2026-07-31) may have already fixed structurally.
+  code references either, safe to just delete), 2 HTML reports
+  (`inat-sync-needs-attention.html`, `observation-report.html`), and
+  `taxon-data.lua` itself (TaxonStore.lua's cache of iNat taxon facts --
+  expensive to rebuild, not something to lose).
+
+  Revised categories (2026-08-09, per the user):
+  - **Reports are NOT disposable** -- reclassified after the user noted
+    they might point a webserver at them eventually. Stay under the
+    backed-up `~/Photos/local/WhatIsThisThing/` tree alongside
+    `taxon-data.lua`, not moved out. Only the logs are genuinely
+    throwaway/regenerable-by-rerunning.
+  - **"Single log" is only achievable per-runtime, not universally** --
+    Python (PlantBook's `book_formatter/`, once folded in) can't call
+    `LrLogger` at all, so it will always need its own separate log file
+    (as it already has: `book_formatter/log/o.log`) no matter what the
+    Lua plugin does. Consolidate to one log WITHIN the Lua plugin's own
+    scope; don't try to force Python and Lua onto one shared file.
+  - **Concurrent-write risk is low within the Lua plugin** -- LrTasks
+    uses cooperative coroutines, not OS threads, so two async tasks can't
+    execute at the literal same instant; a plain `f:write(...)` doesn't
+    yield mid-call, so it completes atomically from the Lua VM's
+    perspective. The real risk would be cross-process (Lua plugin +
+    Python subprocess both writing the same physical file), which is one
+    more reason to keep them as separate per-subsystem logs rather than
+    force a shared one.
+  - Plan: move ONLY the logs to Lightroom's own `LrLogger` facility
+    (`~/Documents/LrClassicLogs/`, consistent with how PlantBook's plugin
+    already does its own logging -- confirmed live it uses `LrLogger`,
+    not a hand-rolled `io.open` file log) -- naturally outside any photo
+    backup sweep since it's not under `~/Photos/` at all. Verify live
+    that `LrLogger` itself handles concurrent calls safely before relying
+    on it -- it's Adobe's own facility, presumably built for this, but
+    not independently confirmed.
+  - Consolidate `inat-sync-log.txt` + `inat-sync-claim-trace.log` into
+    one `LrLogger`-based log -- and check whether the claim-trace log
+    (`logClaim` in `INatSync.lua`) is even still needed at all, not just
+    worth merging: it was built to diagnose a cross-species "already
+    claimed" bug that the species-first sync redesign (2026-07-31) may
+    have already fixed structurally.
   - Prefer writing to that log over showing a dialog full of data, where
     reasonable (fewer interruptions for diagnostic-only info).
-  - Split logs (disposable) / reports (regeneratable) / taxon-data.lua
-    (master, must be backed up) into distinct locations so each can have
-    its own retention/backup treatment instead of living together by
-    accident.
   - Delete the 2 confirmed-orphaned files.
-  - `taxon-data.lua`'s current location was deliberately chosen (per
-    TaxonStore.lua's own comment) because `manage_photo_backups.rb`'s
-    `LOCAL_SOURCE` already sweeps `~/Photos/local/` wholesale -- verify
-    live that it's actually landing on the NAS/Backblaze, not just
-    assumed covered, before restructuring anything (a relocation that
-    isn't itself re-verified against the backup script could
-    accidentally make coverage worse, not better).
+  - Reports + `taxon-data.lua` stay under `~/Photos/local/WhatIsThisThing/`
+    -- maybe split into `data/`/`reports/` subfolders for clarity, since
+    that's now purely organizational (both stay backed up either way).
   - Related, not yet decided: whether `manage_photo_backups.rb` itself
     (currently in `~/bin`, its own separate thing) gets folded into this
     repo as part of a broader single-repo photo-management consolidation
     -- see the PlantBook discussion.
-  - Design this WITH PlantBook's own file types in mind, not just What Is
-    This Thing's current ones (2026-08-09, per the user -- wants
-    consistency across both rather than solving this narrowly then
-    redoing it once PlantBook folds in). PlantBook writes its own kind of
-    generatable HTML output too (`public_html/`, the published plant-
-    guide site, analogous to but distinct from this project's own
-    `observation-report.html`/`inat-sync-needs-attention.html`), plus its
-    own logging -- confirmed live (2026-08-09) that PlantBook's plugin
-    actually uses Lightroom's own `LrLogger` facility (writes to the SDK-
-    standard `~/Documents/LrClassicLogs/PlantBookPlugin.log`), NOT a
-    hand-rolled `io.open` file log like this project's `inat-sync-log.txt`
-    -- a real mechanism difference, not just a location one, to reconcile
-    before settling on one approach.
 - Fold PlantBook into this project (2026-08-09, per the user -- leaning
   toward dropping the PlantBook plugin entirely, rebuilding its
   functionality here, single repo/single LRC plugin for all personal
