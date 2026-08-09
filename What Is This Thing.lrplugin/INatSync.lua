@@ -6,7 +6,6 @@ local LrView = import 'LrView'
 local LrBinding = import 'LrBinding'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrDialogs = import 'LrDialogs'
-local LrTasks = import 'LrTasks'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local KeywordWriter = dofile(LrPathUtils.child(_PLUGIN.path, "KeywordWriter.lua"))
@@ -248,64 +247,6 @@ local function describeClaimedAway(claimedAway)
         end
     end
     return table.concat(parts, "; ")
-end
-
--- Temporary diagnostic (2026-07-31): appends one line per claim decision
--- to a fixed log file, so a recurring "already claimed by an implausible
--- observation" report (confirmed live twice now, both cases NOT
--- reproducible from a clean-slate offline repro against the same
--- observations -- see DEVELOPMENT_NOTES.md) can be traced from an actual
--- live run instead of reconstructed after the fact. Remove once the
--- mechanism behind this is confirmed.
---
--- MUST be LrTasks.pcall, not plain pcall -- plain pcall is a C-call
--- boundary that can't yield in Lightroom's Lua 5.1, and file I/O here
--- does yield. First version used plain pcall and silently produced
--- "Yielding is not allowed within a C or metamethod call" on every
--- single call (confirmed live, 2026-07-31, via the error-fallback path
--- below) -- the same documented failure class as INatSyncRunner.lua's
--- own top-level run wrapper, just not yet learned in this file.
-local function logClaim(mechanism, group, observation)
-    local ok, err = LrTasks.pcall(function()
-        local home = LrPathUtils.getStandardFilePath("home")
-        local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
-        dir = LrPathUtils.child(dir, "WhatIsThisThing")
-        local path = LrPathUtils.child(dir, "inat-sync-claim-trace.log")
-        local filenames = {}
-        for _, photo in ipairs(group.photos) do
-            table.insert(filenames, photo:getFormattedMetadata("fileName") or "?")
-        end
-        local f = assert(io.open(path, "a"))
-        f:write(string.format(
-            "[%s] group{%s time=%s species=%s} claimed by #%s (%s observed %s)\n",
-            mechanism,
-            table.concat(filenames, ","),
-            tostring(group.time),
-            tostring(group.scientificName),
-            tostring(observation.id),
-            observation.taxon and observation.taxon.name or "?",
-            tostring(observation.time_observed_at)
-        ))
-        f:close()
-    end)
-    -- The first version of this silently no-op'd on ANY failure -- turned
-    -- out the log file never got written at all (first real live test,
-    -- 2026-07-31), with no way to tell why. This fallback writes straight
-    -- to $HOME itself (skipping the Photos/local/WhatIsThisThing
-    -- subdirectory, in case creating/finding THAT nested path is somehow
-    -- the actual problem) via the same LrPathUtils.getStandardFilePath
-    -- call already proven to work elsewhere in this file, so a real error
-    -- message surfaces somewhere instead of vanishing a second time.
-    if not ok then
-        LrTasks.pcall(function()
-            local home = LrPathUtils.getStandardFilePath("home")
-            local f = io.open(LrPathUtils.child(home, "inat-claim-trace-error.txt"), "a")
-            if f then
-                f:write(tostring(err) .. "\n")
-                f:close()
-            end
-        end)
-    end
 end
 
 -- Human-readable description of findCandidatesByScientificName's
@@ -645,7 +586,6 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
             if fastGroup then
                 table.insert(toApply, { group = fastGroup, observation = observation })
                 claimedGroups[fastGroup] = observation
-                logClaim("fastpath", fastGroup, observation)
             else
                 local time = parseIsoTimestamp(observation.time_observed_at)
                 local candidateGroups, claimedAway, closestMiss =
@@ -661,7 +601,6 @@ function INatSync.pullAndMatch(username, updatedSince, retryIds, onProgress)
                 elseif #candidateGroups == 1 then
                     table.insert(toApply, { group = candidateGroups[1], observation = observation })
                     claimedGroups[candidateGroups[1]] = observation
-                    logClaim("species-match", candidateGroups[1], observation)
                 else
                     -- More than one same-species local group within the
                     -- window -- no time signal reliable enough to auto-pick

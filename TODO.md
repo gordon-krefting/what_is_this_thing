@@ -7,72 +7,6 @@ this file is the answer -- not memory, not conversation history.
 Completed items are deleted, not checked off -- `git log`/`DEVELOPMENT_NOTES.md`
 already have the history of what shipped and when.
 
-- Reorganize plugin data files + verify/ensure backup coverage.
-  Confirmed live (2026-08-09): `taxon-data.lua` IS already landing on the
-  NAS/Backblaze as intended -- but so are the logs and HTML reports,
-  since everything currently dumps into one swept folder
-  (`~/Photos/local/WhatIsThisThing/`) with no way for the backup script
-  to tell them apart. Current contents: 2 unbounded logs
-  (`inat-sync-log.txt` 676KB, `inat-sync-claim-trace.log` 302KB, both
-  actively growing), 2 orphaned files nobody writes anymore
-  (`inat-recovery-log.txt`, `inat-sync-mismatches.html` -- confirmed no
-  code references either, safe to just delete), 2 HTML reports
-  (`inat-sync-needs-attention.html`, `observation-report.html`), and
-  `taxon-data.lua` itself (TaxonStore.lua's cache of iNat taxon facts --
-  expensive to rebuild, not something to lose).
-
-  Revised categories (2026-08-09, per the user):
-  - **Reports don't need backup after all** -- even though they might get
-    served eventually, the user's settled view is losing them is fine
-    since they'd just rebuild them (regeneration is cheap/acceptable, not
-    something worth protecting). Move to a NEW dedicated location,
-    `~/Photos/output/reports` -- a 5th top-level `~/Photos/` category
-    alongside the 4 already named in `manage_photo_backups.rb`'s own
-    comment block (import/local/catalog/archive), for "generated output
-    artifacts" specifically, kept separate from `~/Photos/local/` (which
-    is about mastered PHOTO files, not app-generated data). Deliberately
-    NOT added to `manage_photo_backups.rb` -- `~/Photos/output/` should
-    stay outside every existing backup source on purpose. `taxon-data.lua`
-    itself stays put in `~/Photos/local/WhatIsThisThing/` -- no reason to
-    touch what's already confirmed working. So logs AND reports both end
-    up outside backup coverage, just in different locations (LrLogger's
-    standard path vs. `~/Photos/output/reports`) -- only `taxon-data.lua`
-    remains something actually worth protecting.
-  - **"Single log" is only achievable per-runtime, not universally** --
-    Python (PlantBook's `book_formatter/`, once folded in) can't call
-    `LrLogger` at all, so it will always need its own separate log file
-    (as it already has: `book_formatter/log/o.log`) no matter what the
-    Lua plugin does. Consolidate to one log WITHIN the Lua plugin's own
-    scope; don't try to force Python and Lua onto one shared file.
-  - **Concurrent-write risk is low within the Lua plugin** -- LrTasks
-    uses cooperative coroutines, not OS threads, so two async tasks can't
-    execute at the literal same instant; a plain `f:write(...)` doesn't
-    yield mid-call, so it completes atomically from the Lua VM's
-    perspective. The real risk would be cross-process (Lua plugin +
-    Python subprocess both writing the same physical file), which is one
-    more reason to keep them as separate per-subsystem logs rather than
-    force a shared one.
-  - Plan: move ONLY the logs to Lightroom's own `LrLogger` facility
-    (`~/Documents/LrClassicLogs/`, consistent with how PlantBook's plugin
-    already does its own logging -- confirmed live it uses `LrLogger`,
-    not a hand-rolled `io.open` file log) -- naturally outside any photo
-    backup sweep since it's not under `~/Photos/` at all. Verify live
-    that `LrLogger` itself handles concurrent calls safely before relying
-    on it -- it's Adobe's own facility, presumably built for this, but
-    not independently confirmed.
-  - Consolidate `inat-sync-log.txt` + `inat-sync-claim-trace.log` into
-    one `LrLogger`-based log -- and check whether the claim-trace log
-    (`logClaim` in `INatSync.lua`) is even still needed at all, not just
-    worth merging: it was built to diagnose a cross-species "already
-    claimed" bug that the species-first sync redesign (2026-07-31) may
-    have already fixed structurally.
-  - Prefer writing to that log over showing a dialog full of data, where
-    reasonable (fewer interruptions for diagnostic-only info).
-  - Delete the 2 confirmed-orphaned files.
-  - Related, not yet decided: whether `manage_photo_backups.rb` itself
-    (currently in `~/bin`, its own separate thing) gets folded into this
-    repo as part of a broader single-repo photo-management consolidation
-    -- see the PlantBook discussion.
 - Fold PlantBook into this project (2026-08-09, per the user -- leaning
   toward dropping the PlantBook plugin entirely, rebuilding its
   functionality here, single repo/single LRC plugin for all personal
@@ -111,8 +45,9 @@ already have the history of what shipped and when.
     needs a decision on where it lives structurally in a merged repo.
   - krefting.org/plantguide is a live site -- needs a cutover sequence
     that doesn't take it down mid-migration, not a rewrite-and-hope.
-  - See also the file-locations item above -- do this with PlantBook's
-    own logging/HTML-output patterns in mind, not just this project's.
+  - Related, not yet decided: whether `manage_photo_backups.rb` itself
+    (currently in `~/bin`, its own separate thing) gets folded into this
+    repo as part of the same single-repo photo-management consolidation.
 - Add a way to refresh iNat taxonomy for local-only observations (never
   uploaded to iNat)
 - Design an iPhone -> Lightroom workflow for all photos (not just iNat

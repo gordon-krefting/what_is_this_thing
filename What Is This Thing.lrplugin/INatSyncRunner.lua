@@ -14,6 +14,7 @@ local INatSync = dofile(LrPathUtils.child(_PLUGIN.path, "INatSync.lua"))
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local INatRecovery = dofile(LrPathUtils.child(_PLUGIN.path, "INatRecovery.lua"))
 local MergeCandidatesDialog = dofile(LrPathUtils.child(_PLUGIN.path, "MergeCandidatesDialog.lua"))
+local PluginLog = dofile(LrPathUtils.child(_PLUGIN.path, "PluginLog.lua"))
 
 -- Confirmed live 2026-07-24: observations uploaded moments before a sync
 -- run can fail to appear in that run's `updated_since` pull even though
@@ -716,12 +717,14 @@ local NEEDS_ATTENTION_LABELS = {
 --
 -- HTML (not plain text) specifically so the iNat links (and photo
 -- thumbnails) are usable straight from the file -- plain text can't do
--- that. Lives alongside TaxonStore.lua's cache file for consistency. Uses
--- plain io.open, like TaxonStore.lua -- NOT yet confirmed live that
--- writing a brand-new file this way works in Lightroom's Lua sandbox
--- (TaxonStore.lua's own note says the same); wrapped in pcall so a failure
--- here degrades to "couldn't write the report" rather than losing the
--- whole sync summary.
+-- that. Lives under ~/Photos/output/reports (2026-08-09 reorg) --
+-- deliberately NOT under ~/Photos/local/, and deliberately NOT backed up
+-- by manage_photo_backups.rb: a report is cheap to regenerate, unlike
+-- TaxonStore.lua's cache file, which stays where it was. Uses plain
+-- io.open, like TaxonStore.lua -- NOT yet confirmed live that writing a
+-- brand-new file this way works in Lightroom's Lua sandbox (TaxonStore.lua's
+-- own note says the same); wrapped in pcall so a failure here degrades to
+-- "couldn't write the report" rather than losing the whole sync summary.
 --
 -- Returns the file path on success, or nil (with no error) if there was
 -- nothing to report or the write failed.
@@ -731,8 +734,8 @@ local function writeNeedsAttentionReport(entries)
     end
 
     local home = LrPathUtils.getStandardFilePath("home")
-    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
-    dir = LrPathUtils.child(dir, "WhatIsThisThing")
+    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "output")
+    dir = LrPathUtils.child(dir, "reports")
     local path = LrPathUtils.child(dir, "inat-sync-needs-attention.html")
 
     local html = {
@@ -784,31 +787,28 @@ local function writeNeedsAttentionReport(entries)
 end
 
 -- Appends a full per-observation record of this run -- every observation
--- actually reached, and exactly which outcome it landed in -- to a
--- plain-text, ever-growing log (unlike the Needs Attention HTML report
--- above, which is overwritten each run and only covers currently-pending
--- items). Exists specifically because a run that appears to do "nothing"
--- for some observations previously left NO trace anywhere once the
--- closing dialog was dismissed -- confirmed live as a real diagnosis
--- blocker. Plain text, not HTML, and append-only (not overwritten) --
--- this is a debugging/audit trail across runs, not a work queue.
+-- actually reached, and exactly which outcome it landed in -- to the
+-- plugin's single consolidated log (see PluginLog.lua), unlike the Needs
+-- Attention HTML report above, which is overwritten each run and only
+-- covers currently-pending items. Exists specifically because a run that
+-- appears to do "nothing" for some observations previously left NO trace
+-- anywhere once the closing dialog was dismissed -- confirmed live as a
+-- real diagnosis blocker. Append-only (not overwritten) -- this is a
+-- debugging/audit trail across runs, not a work queue. Previously its own
+-- separate hand-rolled file (inat-sync-log.txt under
+-- ~/Photos/local/WhatIsThisThing/, growing unboundedly forever); folded
+-- into PluginLog as part of the 2026-08-09 reorg, which also removed the
+-- separate claim-trace log entirely (INatSync.lua's old logClaim --
+-- redundant now that every applied match already lands a line here via
+-- the caller's own logObservation, and the bug it was built to diagnose
+-- was fixed structurally by the 2026-07-31 species-first redesign).
 --
--- Uses plain io.open in append mode, same "not yet confirmed live in
--- Lightroom's Lua sandbox" caveat as writeNeedsAttentionReport/
--- TaxonStore.lua; wrapped in pcall so a failure here never breaks the
--- rest of the summary.
---
--- Returns the file path on success, or nil if there was nothing to log
--- (empty run) or the write failed.
+-- Returns the log's path on success, or nil if there was nothing to log
+-- (empty run).
 local function writeFullSyncLog(runLog, meta)
     if #runLog == 0 and not (meta.pullDebug and #meta.pullDebug > 0) then
         return nil
     end
-
-    local home = LrPathUtils.getStandardFilePath("home")
-    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
-    dir = LrPathUtils.child(dir, "WhatIsThisThing")
-    local path = LrPathUtils.child(dir, "inat-sync-log.txt")
 
     local lines = {
         "=== " .. LrDate.timeToW3CDate(LrDate.currentTime()) .. " -- " .. tostring(meta.syncType)
@@ -839,14 +839,9 @@ local function writeFullSyncLog(runLog, meta)
     end
     table.insert(lines, "")
 
-    local writeOk = pcall(function()
-        LrFileUtils.createAllDirectories(dir)
-        local f = assert(io.open(path, "a"))
-        f:write(table.concat(lines, "\n") .. "\n")
-        f:close()
-    end)
+    PluginLog.append(table.concat(lines, "\n"))
 
-    return writeOk and path or nil
+    return PluginLog.path()
 end
 
 local function formatSummary(counts, needsAttentionCount, reportPath, fullLogPath)

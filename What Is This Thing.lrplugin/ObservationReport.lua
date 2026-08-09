@@ -217,9 +217,12 @@ LrTasks.startAsyncTask(function()
 ]])
     table.insert(html, "</body></html>")
 
+    -- ~/Photos/output/reports (2026-08-09 reorg) -- deliberately NOT under
+    -- ~/Photos/local/, and deliberately NOT backed up by
+    -- manage_photo_backups.rb: this report is cheap to regenerate on demand.
     local home = LrPathUtils.getStandardFilePath("home")
-    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "local")
-    dir = LrPathUtils.child(dir, "WhatIsThisThing")
+    local dir = LrPathUtils.child(LrPathUtils.child(home, "Photos"), "output")
+    dir = LrPathUtils.child(dir, "reports")
     local path = LrPathUtils.child(dir, "observation-report.html")
 
     local writeOk = pcall(function()
