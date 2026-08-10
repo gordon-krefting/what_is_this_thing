@@ -189,7 +189,12 @@ function KeywordWriter.clearIdentification(photo)
 
     photo:setRawMetadata("title", nil)
     photo:setRawMetadata("caption", nil)
-    photo:setRawMetadata("colorNameForLabel", nil)
+    -- "" here, not nil -- confirmed live 2026-08-10: nil crashed with
+    -- "bad argument #1 to 'lower' (string expected, got nil)", Lightroom's
+    -- own internal handler for this field apparently normalizes the value
+    -- via :lower() and doesn't accept nil as "no color" the way title/
+    -- caption do.
+    photo:setRawMetadata("colorNameForLabel", "")
 
     for _, field in ipairs(IDENTIFICATION_FIELDS) do
         photo:setPropertyForPlugin(_PLUGIN, field, nil)
