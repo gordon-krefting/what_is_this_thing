@@ -290,12 +290,30 @@ end
 -- submitted -- not on every dialog open -- so showing the "Use Most
 -- Recent" button never costs a network round trip, only typing in a new
 -- location does.
+--
+-- The place name itself is only needed the NEXT time this dialog opens
+-- (for the "Use Most Recent" button's label) -- doing the reverse-geocode
+-- SYNCHRONOUSLY here used to block whatever called GpsPrompt.choose (e.g.
+-- SpeciesIdentification.lua) from proceeding at all, on a live HTTP round
+-- trip to a free, best-effort public API with no latency guarantee.
+-- Confirmed live 2026-08-09 as an occasional ~10s stall between clicking
+-- "Use These Coordinates" and the CALLER's own next dialog appearing --
+-- well before any export/lookup work of its own even started. lat/lng/
+-- isApproximate are stored immediately below (cheap, no network); the
+-- geocode runs fire-and-forget in its own task so the caller never waits
+-- on it. Self-healing race: if the dialog is reopened again before this
+-- finishes, "Use Most Recent" shows a stale or missing place name for
+-- that one open -- the coordinates themselves are already correct and
+-- unaffected.
 local function storeRecentEntry(lat, lng, isApproximate)
     local prefs = LrPrefs.prefsForPlugin()
     prefs.recentLat = lat
     prefs.recentLng = lng
     prefs.recentApproximate = isApproximate
-    prefs.recentPlaceName = reverseGeocodeLabel(lat, lng)
+
+    LrTasks.startAsyncTask(function()
+        LrPrefs.prefsForPlugin().recentPlaceName = reverseGeocodeLabel(lat, lng)
+    end)
 end
 
 -- Smart/curly quotes -> straight quotes, so DMS input copied from
@@ -544,7 +562,35 @@ function GpsPrompt.choose(promptText, excludePhotos)
             local mapRequestGeneration = 0
             local lastValidLat, lastValidLng = nil, nil
 
+            -- Home/Recent just fill in coordinatesText exactly like typing
+            -- would (see the button definitions below), which drives this
+            -- same refresh path -- but for those two, the place label is
+            -- often already known: Home's gets fetched once when the
+            -- dialog opens (below), and Recent's is already sitting in
+            -- prefs (recentPlaceName, from a previous run's
+            -- storeRecentEntry). Without this cache, clicking either
+            -- button re-ran a live Nominatim lookup for an answer already
+            -- on hand -- confirmed as real, avoidable repeat traffic
+            -- 2026-08-09 (per the user: "I just click one of the buttons
+            -- ... seems like we could save a lookup"). Keyed by the exact
+            -- same "%.6f, %.6f" string the buttons write into the field,
+            -- so a hit is a plain string lookup, not a tolerance
+            -- comparison -- also means a manually-typed coordinate that
+            -- happens to exactly match a known one benefits too, not just
+            -- button clicks specifically.
+            local knownPlaceLabels = {}
+            if recentLat and recentLng and recentPlaceName then
+                knownPlaceLabels[string.format("%.6f, %.6f", recentLat, recentLng)] = recentPlaceName
+            end
+
             local function refreshPlaceLabel(lat, lng, myGeneration)
+                local key = string.format("%.6f, %.6f", lat, lng)
+                local cached = knownPlaceLabels[key]
+                if cached ~= nil then
+                    placeLabel.title = cached
+                    placeLabel.visible = true
+                    return
+                end
                 LrTasks.startAsyncTask(function()
                     local label = reverseGeocodeLabel(lat, lng)
                     if myGeneration ~= mapRequestGeneration then
@@ -553,6 +599,7 @@ function GpsPrompt.choose(promptText, excludePhotos)
                     if label then
                         placeLabel.title = label
                         placeLabel.visible = true
+                        knownPlaceLabels[key] = label
                     else
                         placeLabel.visible = false
                     end
