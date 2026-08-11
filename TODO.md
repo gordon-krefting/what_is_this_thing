@@ -62,7 +62,6 @@ already have the history of what shipped and when.
   observations)
 - Show local + iNat observation counts for the selected species (deferred
   to the ID-process redo)
-- Graceful degradation when the external archive drive isn't mounted
 - Write GPS accuracy into exported photos for approximate locations --
   iNat's importer reads the EXIF `GPSHPositioningError` tag straight into
   the observation's `positional_accuracy` (confirmed directly from
@@ -88,12 +87,3 @@ already have the history of what shipped and when.
   -- there's no way to come back later and find/select every photo
   currently carrying one. Likely the same `catalog:findPhotosWithProperty`
   + select pattern already used by `SelectPendingMetadataSave.lua`.
-- Maybe pull the "Sex" annotation from iNat back into a local field during
-  Sync -- user is NOT convinced this is actually valuable, parked mainly
-  so the research isn't lost. Each observation's `annotations` array has
-  `controlled_attribute_id`/`controlled_value_id` pairs (Sex is attribute
-  id 9; values 10=Female, 11=Male, 20=Cannot Be Determined -- confirmed
-  live against iNat's own `/v1/controlled_terms` endpoint). Same shape as
-  the already-pulled `iNatQualityGrade`/`iNatSuggestedId` fields in
-  INatSync.lua. Caveat: annotations are community-editable, not exclusive
-  to the observer, same as identifications.
