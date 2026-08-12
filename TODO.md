@@ -7,6 +7,22 @@ this file is the answer -- not memory, not conversation history.
 Completed items are deleted, not checked off -- `git log`/`DEVELOPMENT_NOTES.md`
 already have the history of what shipped and when.
 
+- Add an automatic "All About Birds" link (Cornell Lab), same taxon-level
+  pattern as `wikipediaUrl` -- a new `allAboutBirdsUrl` field, computed in
+  `INaturalist.getTaxonFacts` and cached/fanned-out via `TaxonStore`, same
+  as `wikipediaUrl`. Only set when the taxon is actually a bird -- iNat's
+  taxa API already returns `iconic_taxon_name` in the same response
+  `getTaxonFacts` fetches (confirmed live, no extra API call needed), and
+  it reads `"Aves"` for birds specifically (not fish/reptiles/etc -- iNat's
+  13 iconic taxa are their own fixed list, confirmed live against the
+  API). URL pattern (confirmed live against several real pages):
+  `https://www.allaboutbirds.org/guide/<preferred_common_name, spaces ->
+  underscores, apostrophes DROPPED not encoded>` -- e.g. "Wilson's
+  Warbler" -> `Wilsons_Warbler`, not `Wilson's_Warbler`. Like the recent
+  `taxonUrl` field, this won't retroactively appear on already-identified
+  bird photos -- `TaxonStore` only refetches taxon facts on a cache miss,
+  so populating existing species needs the same kind of one-off backfill
+  script (BackfillTaxonUrl.lua's pattern, since removed after use).
 - Add a "Manage Observation" menu item/dialog consolidating per-observation
   actions that currently live as separate commands -- "Drop Photo" (remove
   a photo from its observation/group), "Set Cultivar", etc. Details TBD.
