@@ -311,7 +311,7 @@ local function buildLocalIndex(catalog)
     -- catalog:findPhotos with a custom-field searchDesc was confirmed
     -- non-functional in this environment across 8 tried syntax variants
     -- (see DEVELOPMENT_NOTES.md); findPhotosWithProperty, already relied
-    -- on live elsewhere (SetCultivar.lua, EditTaxonInfo.lua), instead
+    -- on live elsewhere (SetCultivar.lua, ManageFloraObservation.lua), instead
     -- gives the set of photos that have ever been through this plugin's
     -- identify flow directly, without a per-photo property read. Used
     -- here to skip the 4 getPropertyForPlugin calls below (scientificName,

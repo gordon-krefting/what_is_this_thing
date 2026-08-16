@@ -100,9 +100,18 @@ local function callApi(photoPaths, organ, apiKey)
     return response, status
 end
 
--- Extracts a { score, scientificName, commonName, rank } list from one of
--- otherResults' "genus" or "family" arrays (each entry keyed by that same
--- name, e.g. entry.genus / entry.family).
+-- Extracts a { score, scientificName, commonName, allCommonNames, rank }
+-- list from one of otherResults' "genus" or "family" arrays (each entry
+-- keyed by that same name, e.g. entry.genus / entry.family).
+--
+-- `commonName` (commonNames[1]) stays the arbitrary pick used for display
+-- (Pl@ntNet's array carries no ordering guarantee, per its own docs --
+-- see INaturalist.getMajorAncestryForCandidate's doc comment for why
+-- iNat's preferred_common_name overrides it when available) -- no change
+-- to that. `allCommonNames` (added 2026-08-11) is the FULL array, kept
+-- alongside it specifically so KeywordWriter.applyIdentification can
+-- merge every name into TaxonStore's commonNames list, not just whichever
+-- one happened to land in position 1.
 local function parseOtherResultsGroup(group, key)
     local parsed = {}
     for _, entry in ipairs(group or {}) do
@@ -112,6 +121,7 @@ local function parseOtherResultsGroup(group, key)
             score = (entry.score or 0) * 100,
             scientificName = taxon.scientificName or "unknown",
             commonName = commonNames[1],
+            allCommonNames = commonNames,
             rank = key,
         })
     end
@@ -120,14 +130,18 @@ end
 
 -- Runs the lookup, prompting for the API key if missing and re-prompting once
 -- on auth failure. Returns { results, genusResults, familyResults }:
---   results       - list of { score, scientificName, authorship, commonName },
---                    species level, highest score first (the API returns
---                    them sorted). authorship (e.g. "Raf.") is nil for
---                    genus/family entries below; Pl@ntNet's own web pages
---                    (identify.plantnet.org) key species pages on
---                    "scientificName authorship" together, not the bare name.
---   genusResults  - list of { score, scientificName, commonName, rank="genus" },
---                    from the "detailed" otherResults.genus rollup.
+--   results       - list of { score, scientificName, authorship, commonName,
+--                    allCommonNames }, species level, highest score first
+--                    (the API returns them sorted). authorship (e.g.
+--                    "Raf.") is nil for genus/family entries below;
+--                    Pl@ntNet's own web pages (identify.plantnet.org) key
+--                    species pages on "scientificName authorship"
+--                    together, not the bare name. allCommonNames is the
+--                    full array behind the arbitrary commonName pick (see
+--                    parseOtherResultsGroup's own comment).
+--   genusResults  - list of { score, scientificName, commonName,
+--                    allCommonNames, rank="genus" }, from the "detailed"
+--                    otherResults.genus rollup.
 --   familyResults - same shape, rank="family", from otherResults.family.
 -- genusResults/familyResults are always populated (Pl@ntNet computes them
 -- unconditionally when detailed=true, unlike iNaturalist's confidence-gated
@@ -169,6 +183,9 @@ function PlantNet.identify(photoPaths, organ)
             scientificName = species.scientificNameWithoutAuthor or "unknown",
             authorship = species.scientificNameAuthorship,
             commonName = commonNames[1],
+            -- Full array, not just the arbitrary [1] pick -- see
+            -- parseOtherResultsGroup's own comment above for why.
+            allCommonNames = commonNames,
         })
     end
 

@@ -25,8 +25,8 @@ return {
             file = "SetCultivar.lua",
         },
         {
-            title = "Edit Taxon Info",
-            file = "EditTaxonInfo.lua",
+            title = "Manage Local Flora Observation",
+            file = "ManageFloraObservation.lua",
         },
         {
             title = "Split Observation",
@@ -59,6 +59,10 @@ return {
         {
             title = "Backfill Taxon ID (one-off)",
             file = "BackfillTaxonId.lua",
+        },
+        {
+            title = "Migrate PlantBook Metadata (one-off)",
+            file = "MigratePlantBookMetadata.lua",
         },
         {
             title = "Show Observation Filenames (one-off)",

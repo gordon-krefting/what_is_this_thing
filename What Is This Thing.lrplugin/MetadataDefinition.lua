@@ -144,6 +144,159 @@ return {
             browsable = true,
         },
         {
+            id = "observationNickname",
+            title = "Observation Nickname",
+            dataType = "string",
+            searchable = true,
+            browsable = true,
+            -- New 2026-08-16, per the user -- distinct from the
+            -- specimen-level `nickname` below despite the similar name
+            -- and both being free descriptive text. This one is
+            -- OBSERVATION-scoped (same mechanism as `cultivar` above --
+            -- a plain photo property, fanned out to the observation via
+            -- ObservationGroup.expand, no SpecimenStore involved) and
+            -- exists to disambiguate an INCOMPLETE identification (e.g.
+            -- "goldenrod with red flecks on the leaves" for a genus-only
+            -- ID) from other equally-undetermined sightings -- it applies
+            -- even to a one-off observation you'll never revisit.
+            -- Specimen nickname is the opposite axis: identity of one
+            -- PHYSICAL individual tracked across multiple SEPARATE
+            -- observations over time, independent of whether its ID is
+            -- precise. Cleared alongside the rest of an identification
+            -- (see KeywordWriter.lua's IDENTIFICATION_FIELDS) since it
+            -- describes that specific ID, not the specimen.
+        },
+        {
+            id = "observationNotes",
+            title = "Observation Notes",
+            dataType = "string",
+            searchable = true,
+            -- New 2026-08-16 -- free-form notes about THIS observation
+            -- specifically (e.g. "leaves showing early fall color"),
+            -- distinct from both observationNickname above (a short
+            -- disambiguating LABEL, not general notes -- also shown in
+            -- specimen-picker contexts where a long note would look out
+            -- of place) and the taxon-level `notes` below (shared across
+            -- every photo of the species/cultivar, wrong fit for
+            -- something that can genuinely differ photo to photo). Same
+            -- mechanism as cultivar/observationNickname -- a plain photo
+            -- property, fanned out to the observation via
+            -- ObservationGroup.expand. Cleared alongside the rest of an
+            -- identification (see KeywordWriter.lua's IDENTIFICATION_FIELDS).
+        },
+
+        -- Specimen-level fields (2026-08-11): facts about one enduring
+        -- PHYSICAL individual plant, not one identify session -- cached in
+        -- SpecimenStore.lua (a local file, like TaxonStore.lua), fanned out
+        -- to every photo sharing a specimenId. Optional/opt-in -- most
+        -- observations (any non-garden sighting) never get one. All six
+        -- readOnly for the same reason as the taxon-level fields below:
+        -- editable only through ManageFloraObservation.lua, which fans out
+        -- to every photo of that specimen's own observation, not the
+        -- Metadata panel directly.
+        {
+            id = "specimenId",
+            title = "Specimen ID",
+            dataType = "string",
+            searchable = true,
+            -- Auto-assigned by ManageFloraObservation.lua; never hand-typed -- same
+            -- reasoning as observationId above (a mistyped UUID would
+            -- silently break the grouping it exists for).
+            readOnly = true,
+        },
+        {
+            id = "gardenLocation",
+            title = "Specimen Location",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Single-valued, unlike the taxon-level gardenLocations
+            -- checklist below -- a specimen is one physical, stationary
+            -- plant, so it only ever has one location. Titled "Specimen
+            -- Location" (not just "Location") to avoid sitting confusingly
+            -- close to approximateLocation above and gardenLocations below.
+            -- Values verbatim from PlantBook's own `location` enum.
+            values = {
+                { value = nil, title = "(unknown)" },
+                { value = "backyard", title = "Back Yard" },
+                { value = "frontyard", title = "Front Yard" },
+                { value = "meadow", title = "Meadow" },
+                { value = "meadowgarden", title = "Meadow Garden" },
+                { value = "pondarea", title = "Pond Area" },
+                { value = "slopegarden", title = "Slope Garden" },
+                { value = "other", title = "The Woods" },
+            },
+            allowPluginToSetOtherValues = true,
+            readOnly = true,
+        },
+        {
+            id = "locationNotes",
+            title = "Specimen Location Notes",
+            dataType = "string",
+            searchable = true,
+            -- New 2026-08-16, per the user -- a free-text note about
+            -- specifically where THIS specimen is (e.g. "near the big
+            -- oak, north side"), distinct from the taxon-level
+            -- gardenLocations checklist's own per-location descriptions
+            -- (those describe where the SPECIES as a whole has been
+            -- seen, one description per checked location; this describes
+            -- one specimen's own single location in more detail).
+            readOnly = true,
+        },
+        {
+            id = "plantingMethod",
+            title = "Introduction Method",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- Field id stays `plantingMethod` (only the display title
+            -- changed, 2026-08-15, per the user) -- values verbatim from
+            -- PlantBook's own `introduced` enum, aside from "preexistent"'s
+            -- title (was "Preexistent", now "Natural"; the stored value
+            -- string itself is unchanged). Note this title choice does
+            -- reintroduce some overlap with establishmentMeans below
+            -- (native/introduced, iNat's ecological sense) -- flagged to
+            -- the user, who confirmed it's fine given the two fields sit
+            -- in different panel sections (Specimen vs. Species Info).
+            values = {
+                { value = nil, title = "(unknown)" },
+                { value = "preexistent", title = "Natural" },
+                { value = "seed", title = "Seeding" },
+                { value = "bulb", title = "Bulbs" },
+                { value = "plant", title = "Planting" },
+            },
+            allowPluginToSetOtherValues = true,
+            readOnly = true,
+        },
+        {
+            id = "plantingYear",
+            title = "Introduction Year",
+            dataType = "string",
+            searchable = true,
+            browsable = true,
+            -- Field id stays `plantingYear` (only the display title
+            -- changed, 2026-08-16, per the user, matching the same
+            -- title-only-rename precedent as plantingMethod/"Introduction
+            -- Method" above) -- see TODO.md for the parked broader
+            -- cleanup renaming both underlying field ids to match.
+            readOnly = true,
+        },
+        {
+            id = "nickname",
+            title = "Specimen Nickname",
+            dataType = "string",
+            searchable = true,
+            browsable = true,
+            -- Purely descriptive, e.g. "The tall, shaggy goldenrod" -- not
+            -- a stand-in for a real identification. Exists for cases like
+            -- several visually-similar species only identifiable to genus
+            -- (e.g. several yard Solidago), where Specimen is what keeps
+            -- them from collapsing into one undifferentiated entry, but
+            -- they still need a human label to tell apart in a list.
+            readOnly = true,
+        },
+
+        {
             id = "approximateLocation",
             title = "Approximate Location",
             dataType = "enum",
@@ -292,22 +445,32 @@ return {
             readOnly = true,
         },
 
-        -- Taxon-level fields (2026-07-22): facts about the *species*, not
-        -- the individual photo or observation -- cached in TaxonStore.lua
-        -- (a local file, not the catalog) as the source of truth, then
-        -- denormalized here so they're visible/searchable in Lightroom's
-        -- own panels. All five are readOnly for the same reason: with
-        -- potentially dozens of photos sharing one taxon, a hand-edit on
-        -- just one photo would silently drift out of sync with the rest --
-        -- changes must go through TaxonStore (which fans out to every
-        -- matching photo), not the Metadata panel directly.
+        -- Taxon-level fields (2026-07-22, extended 2026-08-11): facts about
+        -- the *species* (or, for growthHabit/nativity/gardenLocations/
+        -- notes, a specific *cultivar* of it -- see TaxonStore.lua's
+        -- cultivar-aware get/set), not the individual photo or observation
+        -- -- cached in TaxonStore.lua (a local file, not the catalog) as
+        -- the source of truth, then denormalized here so they're
+        -- visible/searchable in Lightroom's own panels. All are readOnly
+        -- for the same reason: with potentially dozens of photos sharing
+        -- one taxon, a hand-edit on just one photo would silently drift
+        -- out of sync with the rest -- changes must go through TaxonStore
+        -- (which fans out to every matching photo), not the Metadata panel
+        -- directly.
         --
-        -- All plain `string`, not `enum`, even where the underlying value
-        -- set is small (e.g. IUCN conservation categories, native/
-        -- introduced) -- learned the hard way with Taxon Rank that an enum
-        -- value outside the declared list renders blank in the Metadata
-        -- panel even when the write itself succeeds. String has no such
-        -- gap and needs no value list to maintain.
+        -- Mostly plain `string`, not `enum`, even where the underlying
+        -- value set is small (e.g. IUCN conservation categories, iNat's
+        -- own establishment-means terms) -- learned the hard way with
+        -- Taxon Rank that an enum value outside the declared list renders
+        -- blank in the Metadata panel even when the write itself succeeds.
+        -- String has no such gap and needs no value list to maintain.
+        -- growthHabit/nativity are the deliberate exceptions -- their
+        -- value sets are small, stable, and shared with PlantBook's own
+        -- enums, so the enum's structure/filterability is worth the
+        -- `allowPluginToSetOtherValues` safety net that gap requires.
+        -- gardenLocations is a further exception: not an enum despite a
+        -- fixed value set, because its real shape is a multi-select
+        -- checklist, not a single value at all (see its own comment).
         {
             id = "conservationStatus",
             title = "Conservation Status",
@@ -327,11 +490,76 @@ return {
         {
             id = "growthHabit",
             title = "Growth Habit",
-            dataType = "string",
+            dataType = "enum",
+            version = 2,
             searchable = true,
             browsable = true,
             -- Manual only -- no reliable API source (GBIF/USDA both
-            -- dead ends, see project memory). Set via EditTaxonInfo.lua.
+            -- dead ends, see project memory). Set via ManageFloraObservation.lua.
+            -- Converted from a free string to this enum 2026-08-11 --
+            -- values reused verbatim from PlantBook's own `plantType`
+            -- enum, so the eventual website-generation phase can reuse
+            -- book_formatter/values.py's PLANTING_TYPES-style dict almost
+            -- as-is. allowPluginToSetOtherValues as a safety net (see
+            -- Taxon Rank's own comment above for why).
+            --
+            -- `version = 2` required here (confirmed live 2026-08-15,
+            -- Lightroom refused to upgrade the catalog without it): unlike
+            -- adding a brand-new field (no prior registration to conflict
+            -- with), changing an EXISTING field's dataType needs an
+            -- explicit per-field version bump, or Lightroom has no way to
+            -- know this is an intentional change to how already-stored
+            -- data should be reinterpreted, not a plugin bug.
+            values = {
+                { value = nil, title = "(unknown)" },
+                { value = "tree", title = "Tree" },
+                { value = "shrub", title = "Shrub" },
+                { value = "forb", title = "Forb" },
+                { value = "fern", title = "Fern" },
+                { value = "fungus", title = "Fungus" },
+                { value = "grass", title = "Grass, Sedge or Rush" },
+                { value = "vine", title = "Vine" },
+                { value = "otherplant", title = "Other" },
+            },
+            allowPluginToSetOtherValues = true,
+            readOnly = true,
+        },
+        {
+            id = "nativity",
+            title = "Nativity",
+            dataType = "enum",
+            searchable = true,
+            browsable = true,
+            -- New 2026-08-11, from PlantBook's own `nativity` enum
+            -- (values verbatim) -- deliberately kept separate from
+            -- establishmentMeans above (auto-pulled from iNat) rather than
+            -- merged, per the user. Manual only, set via ManageFloraObservation.lua.
+            values = {
+                { value = nil, title = "(unknown)" },
+                { value = "native", title = "Native" },
+                { value = "nonnative", title = "Non-native" },
+                { value = "invasive", title = "Invasive" },
+            },
+            allowPluginToSetOtherValues = true,
+            readOnly = true,
+        },
+        {
+            id = "gardenLocations",
+            title = "Garden Locations",
+            dataType = "string",
+            searchable = true,
+            browsable = true,
+            -- New 2026-08-11 -- a multi-select checklist of garden
+            -- locations this SPECIES is known to grow in (distinct from
+            -- the specimen-level, single-valued `gardenLocation` above --
+            -- a Lightroom metadata field id must be unique per plugin, and
+            -- a specimen-linked photo needs both as separate rows). Real
+            -- storage in TaxonStore.lua is a map ({ [locationValue] =
+            -- descriptionOrFalse }), edited via checkboxes in
+            -- ManageFloraObservation.lua -- this field is a plain readOnly string,
+            -- a computed joined rendering (e.g. "Meadow (near the big
+            -- oak); Pond Area") for panel display/search, since Lightroom's
+            -- metadata dataTypes have no native multi-select/map shape.
             readOnly = true,
         },
         {
@@ -346,7 +574,7 @@ return {
             title = "Species Notes",
             dataType = "string",
             searchable = true,
-            -- Manual only, set via EditTaxonInfo.lua.
+            -- Manual only, set via ManageFloraObservation.lua.
             readOnly = true,
         },
     },

@@ -103,3 +103,11 @@ already have the history of what shipped and when.
   -- there's no way to come back later and find/select every photo
   currently carrying one. Likely the same `catalog:findPhotosWithProperty`
   + select pattern already used by `SelectPendingMetadataSave.lua`.
+- Rename `plantingMethod`'s `"preexistent"` enum value string to something
+  matching its current display title ("Natural" as of 2026-08-15) --
+  currently just the title changed, the stored value string is still the
+  old `"preexistent"` (kept as-is at the time to avoid a data-migration
+  step for a single-word rename). Needs a real migration (find every photo
+  with `plantingMethod == "preexistent"`, rewrite to the new value string)
+  plus updating `SpecimenStore.lua` entries that store it too -- parked for
+  a broader cleanup pass rather than done in isolation.

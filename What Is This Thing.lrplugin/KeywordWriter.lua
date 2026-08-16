@@ -1,5 +1,6 @@
 local LrApplication = import 'LrApplication'
 local LrPathUtils = import 'LrPathUtils'
+local LrTasks = import 'LrTasks'
 
 local INaturalist = dofile(LrPathUtils.child(_PLUGIN.path, "INaturalist.lua"))
 local TaxonStore = dofile(LrPathUtils.child(_PLUGIN.path, "TaxonStore.lua"))
@@ -9,9 +10,37 @@ local PendingMetadataSave = dofile(LrPathUtils.child(_PLUGIN.path, "PendingMetad
 local KeywordWriter = {}
 
 -- Fields written per photo whenever a taxon-level entry (fetched or cached
--- via TaxonStore) is available. Kept as a list rather than five separate
+-- via TaxonStore) is available. Kept as a list rather than separate
 -- if-blocks so it's one place to update if a field gets added/removed.
-local TAXON_LEVEL_FIELDS = { "conservationStatus", "establishmentMeans", "growthHabit", "wikipediaUrl", "notes" }
+-- Two deliberate exclusions: commonNames/preferredCommonName don't
+-- denormalize onto the photo directly (they drive the `commonName` write
+-- below instead -- see the commonName-resolution block in
+-- applyIdentification); gardenLocations is a map, not a scalar, so it
+-- can't go through this generic loop's plain setPropertyForPlugin call --
+-- see the dedicated TaxonStore.formatGardenLocations call after the loop.
+local TAXON_LEVEL_FIELDS = {
+    "conservationStatus", "establishmentMeans", "growthHabit", "nativity", "wikipediaUrl", "notes",
+}
+
+-- { [value] = title } for the garden-location enum, built once from
+-- MetadataDefinition.lua's own declared values (the specimen-level
+-- gardenLocation field -- same 7 locations the taxon-level checklist
+-- uses) -- passed to TaxonStore.formatGardenLocations wherever this file
+-- denormalizes that map onto a photo, so the panel-facing string reads
+-- "Meadow" rather than the raw "meadow".
+local LOCATION_TITLES = {}
+do
+    local metadataDef = dofile(LrPathUtils.child(_PLUGIN.path, "MetadataDefinition.lua"))
+    for _, field in ipairs(metadataDef.metadataFieldsForPhotos) do
+        if field.id == "gardenLocation" then
+            for _, entry in ipairs(field.values) do
+                if entry.value then
+                    LOCATION_TITLES[entry.value] = entry.title
+                end
+            end
+        end
+    end
+end
 
 -- Every custom field that makes up a photo's identification -- everything
 -- clearIdentification below wipes. Deliberately excludes
@@ -19,11 +48,16 @@ local TAXON_LEVEL_FIELDS = { "conservationStatus", "establishmentMeans", "growth
 -- those are operational/provenance facts about the photo (GPS-approximation
 -- flag, recovered-placeholder origin, pending-save tracking), not part of
 -- what species it's identified as, and stay valid independent of whether
--- the identification itself was ever correct.
+-- the identification itself was ever correct. Includes the specimen fields
+-- (2026-08-11) -- a specimen belongs to one species, so if the species
+-- identification was wrong, whatever specimen it was linked to is no
+-- longer valid either, same reasoning already applied to observationId.
 local IDENTIFICATION_FIELDS = {
-    "scientificName", "commonName", "taxonRank", "taxonId", "taxonUrl", "idConfidence", "cultivar", "observationId",
+    "scientificName", "commonName", "taxonRank", "taxonId", "taxonUrl", "idConfidence", "cultivar",
+    "observationNickname", "observationNotes", "observationId",
     "iNatObservationId", "iNatObservationUrl", "iNatQualityGrade", "iNatSuggestedId",
-    "conservationStatus", "establishmentMeans", "growthHabit", "wikipediaUrl", "notes",
+    "conservationStatus", "establishmentMeans", "growthHabit", "nativity", "gardenLocations", "wikipediaUrl", "notes",
+    "specimenId", "gardenLocation", "locationNotes", "plantingMethod", "plantingYear", "nickname",
 }
 
 -- All species-ID keywords are nested under this parent (not itself included
@@ -38,8 +72,50 @@ local function formatLabel(commonName, scientificName)
     return scientificName
 end
 
-local function formatCaption(candidate)
-    return formatLabel(candidate.commonName, candidate.scientificName)
+-- Minor words that stay lowercase mid-name in proper title case, unless
+-- they're the first or last word -- see ManageFloraObservation.lua's own
+-- copy of this list for the full rationale.
+local MINOR_WORDS = {
+    ["a"] = true, ["an"] = true, ["and"] = true, ["as"] = true, ["at"] = true,
+    ["but"] = true, ["by"] = true, ["for"] = true, ["in"] = true, ["nor"] = true,
+    ["of"] = true, ["on"] = true, ["or"] = true, ["so"] = true, ["the"] = true,
+    ["to"] = true, ["up"] = true, ["yet"] = true, ["via"] = true, ["vs"] = true,
+}
+
+local function capitalizeWord(word)
+    return (word:gsub("(%a)([%a']*)", function(first, rest)
+        return first:upper() .. rest:lower()
+    end))
+end
+
+-- Normalizes a common name to proper Title Case ("great mullein" ->
+-- "Great Mullein", "charmin of the woods" -> "Charmin of the Woods") --
+-- see ManageFloraObservation.lua's own copy of this helper for the full
+-- rationale (iNat's raw API casing is inconsistent, PlantNet's more so).
+-- Applied centrally in addName below, the single chokepoint every
+-- automatically-merged name passes through regardless of which API field
+-- it came from, so differently-cased spellings of the same name collapse
+-- into one TaxonStore entry instead of accumulating as separate ones.
+local function titleCase(str)
+    if not str then
+        return str
+    end
+    local words = {}
+    for word in str:gmatch("%S+") do
+        table.insert(words, word)
+    end
+    if #words == 0 then
+        return str
+    end
+    for i, word in ipairs(words) do
+        local bare = word:match("^%a+$")
+        if i ~= 1 and i ~= #words and bare and MINOR_WORDS[bare:lower()] then
+            words[i] = bare:lower()
+        else
+            words[i] = capitalizeWord(word)
+        end
+    end
+    return table.concat(words, " ")
 end
 
 -- True if `keyword` is `ancestorKeyword` itself or nested anywhere beneath
@@ -217,6 +293,71 @@ local function buildAncestryChain(catalog, parentKeyword, ancestry)
     return current
 end
 
+-- Renames `photo`'s leaf "Species ID" keyword to `newLabel`, preserving
+-- whatever ancestry branch (class/order/family/genus, or none) it was
+-- already nested under -- unlike applyIdentification's own keyword swap,
+-- this doesn't touch or rebuild the ancestry chain at all, since nothing
+-- about the taxonomic classification changed, only the common-name text
+-- embedded in the leaf's own label. Exported for
+-- ManageFloraObservation.lua's Common Name picker -- editing the
+-- preferred common name there was updating the photo's Caption but
+-- leaving this keyword stale (confirmed live 2026-08-17). No-ops if the
+-- photo has no existing species keyword (shouldn't happen for an
+-- already-identified photo, but cheap to guard) or the label's already
+-- correct. Caller must already be inside a catalog:withWriteAccessDo
+-- block, same convention as applyIdentification's own per-photo work.
+function KeywordWriter.renameSpeciesKeyword(catalog, photo, newLabel)
+    local parentKeyword = findParentKeyword(catalog)
+    if not parentKeyword then
+        return
+    end
+
+    local currentKeywords = photo:getRawMetadata("keywords") or {}
+    local oldLeaf
+    for _, kw in ipairs(currentKeywords) do
+        if isDescendantOf(kw, parentKeyword) then
+            oldLeaf = kw
+            break
+        end
+    end
+    if not oldLeaf or oldLeaf:getName() == newLabel then
+        return
+    end
+
+    -- Each SDK call isolated in its own LrTasks.pcall -- confirmed live
+    -- 2026-08-17 that this whole function throws "assertion failed!" for
+    -- SOME migrated photos (never for normally-identified ones), and that
+    -- message carries no detail even when caught by an OUTER pcall (see
+    -- ManageFloraObservation.lua's own call site) -- isolating which
+    -- SPECIFIC call fails is the only way left to narrow this down
+    -- further, since the message text itself is a dead end.
+    local okParent, parentResult = LrTasks.pcall(function() return oldLeaf:getParent() end)
+    if not okParent then
+        error(string.format("getParent() on old leaf %q failed: %s", oldLeaf:getName(), tostring(parentResult)))
+    end
+    local branchKeyword = parentResult or parentKeyword
+
+    local okCreate, newLeaf = LrTasks.pcall(function()
+        return catalog:createKeyword(newLabel, {}, true, branchKeyword, true)
+    end)
+    if not okCreate then
+        error(string.format(
+            "createKeyword(%q, parent=%q) failed: %s",
+            newLabel, branchKeyword and branchKeyword:getName() or "(nil)", tostring(newLeaf)
+        ))
+    end
+
+    local okRemove, removeErr = LrTasks.pcall(function() photo:removeKeyword(oldLeaf) end)
+    if not okRemove then
+        error(string.format("removeKeyword(%q) failed: %s", oldLeaf:getName(), tostring(removeErr)))
+    end
+
+    local okAdd, addErr = LrTasks.pcall(function() photo:addKeyword(newLeaf) end)
+    if not okAdd then
+        error(string.format("addKeyword(%q) failed: %s", newLabel, tostring(addErr)))
+    end
+end
+
 -- Recursively fills `map[name] = keyword` for every keyword nested anywhere
 -- beneath `keyword` (at any depth), keyed by its exact label text.
 local function collectKeywordsByName(keyword, map)
@@ -288,35 +429,135 @@ end
 --     MetadataDefinition.lua, so identifications are searchable/filterable
 --     as real structured data, not just free text,
 --   - and sets the taxon-level fields (Conservation Status, Establishment
---     Means, Growth Habit, Wikipedia, Notes) from TaxonStore.lua's local
---     cache -- fetching fresh from iNaturalist only the first time this
---     species is encountered (TaxonStore.get() returns a non-nil, even if
---     empty, table for anything already checked, so a species with no
---     notable data doesn't get re-fetched every time either). Growth
---     Habit/Notes are manual-only (see EditTaxonInfo.lua) but flow through
---     the same cache, so a species already annotated automatically carries
---     that forward onto newly-identified photos of it too.
+--     Means, Growth Habit, Nativity, Garden Locations, Wikipedia, Notes)
+--     from TaxonStore.lua's local cache -- fetching fresh from
+--     iNaturalist only the first time this species is encountered
+--     (TaxonStore.get() returns a non-nil, even if empty, table for
+--     anything already checked, so a species with no notable data doesn't
+--     get re-fetched every time either). Growth Habit/Nativity/Garden
+--     Locations/Notes are manual-only (see ManageFloraObservation.lua) but flow
+--     through the same cache, so a species already annotated
+--     automatically carries that forward onto newly-identified photos of
+--     it too. If any of the `photos` already carries a `cultivar`, the
+--     lookup is cultivar-aware (see TaxonStore.lua) -- re-identifying an
+--     already-cultivar-tagged photo won't clobber its cultivar-specific
+--     growth habit/nativity/garden locations with the bare species'.
+--   - resolves Common Name through the same cache (2026-08-11): once a
+--     species has a `preferredCommonName` on file, every future
+--     identification uses it -- overriding whatever this run's own API
+--     result says -- for the same consistency guarantee the other
+--     taxon-level fields already have. The very first identification of a
+--     species seeds it from its own resolved name. Either way, every name
+--     actually seen this run (`candidate.commonName`, plus
+--     `candidate.allCommonNames` if present -- see PlantNet.lua) is merged
+--     into the taxon's `commonNames` list, deduped, tagged by source, so
+--     it grows opportunistically without ever silently changing what's
+--     preferred.
 -- Must be called from within an async task; performs a catalog write.
 function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     local catalog = LrApplication.activeCatalog()
-    local caption = formatCaption(candidate)
     -- Nil rank means species by this codebase's established convention
     -- (see isSpecies() in SpeciesIdentification.lua) -- normalize it here
     -- rather than storing an ambiguous-looking blank/"(unknown)" value
     -- for the common case.
     local rankValue = candidate.rank or "species"
     local observationId = findExistingObservationId(photos) or KeywordWriter.generateUUID()
+    -- "First found wins" -- same convention findExistingObservationId
+    -- above already uses -- a batch is normally one subject/individual,
+    -- so differing cultivar values across `photos` isn't expected.
+    local existingCultivar
+    for _, photo in ipairs(photos) do
+        existingCultivar = photo:getPropertyForPlugin(_PLUGIN, "cultivar")
+        if existingCultivar then
+            break
+        end
+    end
 
     -- Network call (inside getTaxonFacts) -- must happen before the write
-    -- transaction starts, not inside it.
-    local taxonEntry = TaxonStore.get(candidate.scientificName)
-    if not taxonEntry and candidate.id then
+    -- transaction starts, not inside it. Checked against the BARE species
+    -- entry specifically (not the cultivar-aware merged view below) --
+    -- API-sourced facts (conservationStatus/establishmentMeans/
+    -- wikipediaUrl/commonNames/preferredCommonName) only ever live on the
+    -- bare entry (see TaxonStore.lua's BARE_ONLY_FIELDS), so THAT's what
+    -- actually indicates whether they've ever been fetched, regardless of
+    -- whether a cultivar-specific entry already independently exists.
+    --
+    -- Gate is TaxonStore.hasInatCommonNames, NOT just `not bareEntry` or
+    -- `not bareEntry.commonNames` -- found live 2026-08-16, two layers
+    -- deep: (1) virtually every species already had a bare entry
+    -- (conservationStatus/wikipediaUrl, cached long before commonNames
+    -- existed), so `not bareEntry` alone almost never fired; (2) even
+    -- fixing that to check `commonNames` specifically still wasn't enough,
+    -- since commonNames gains an "identify"-tagged entry on literally
+    -- every identify run regardless (this function's own merge logic
+    -- below, unconditional) -- so a species could easily have a non-nil
+    -- commonNames list despite the richer iNat &all_names=true fetch
+    -- never having actually run. Only an "inat"-sourced entry proves the
+    -- bulk fetch happened -- see TaxonStore.hasInatCommonNames's own
+    -- comment.
+    local bareEntry = TaxonStore.get(candidate.scientificName)
+    if (not bareEntry or not TaxonStore.hasInatCommonNames(bareEntry.commonNames)) and candidate.id then
         local gps = photos[1] and photos[1]:getRawMetadata("gps")
         local lat = gps and gps.latitude
         local lng = gps and gps.longitude
         local facts = INaturalist.getTaxonFacts(candidate.id, lat, lng)
-        taxonEntry = TaxonStore.set(candidate.scientificName, facts)
+        TaxonStore.set(candidate.scientificName, facts)
     end
+    local taxonEntry = TaxonStore.get(candidate.scientificName, existingCultivar)
+
+    -- Common-name resolution (2026-08-11) -- see this function's own doc
+    -- comment above for the full rationale.
+    local resolvedCommonName = titleCase(candidate.commonName)
+    do
+        local existingPreferred = taxonEntry and taxonEntry.preferredCommonName
+        if existingPreferred then
+            resolvedCommonName = existingPreferred
+        end
+
+        -- Tracked directly rather than via a before/after count comparison
+        -- -- titleCase normalization can now SHRINK the merged list (two
+        -- old case-variant duplicates collapsing into one) in the same
+        -- pass that ADDS a genuinely new name, so a raw count comparison
+        -- could mask a real addition behind a simultaneous dedup.
+        local seen, mergedNames = {}, {}
+        local changed = false
+        for _, entry in ipairs((taxonEntry and taxonEntry.commonNames) or {}) do
+            local name = titleCase(entry.name)
+            if name and not seen[name] then
+                seen[name] = true
+                table.insert(mergedNames, { name = name, source = entry.source })
+            else
+                changed = true
+            end
+            if name ~= entry.name then
+                changed = true
+            end
+        end
+        local function addName(name, source)
+            name = titleCase(name)
+            if name and not seen[name] then
+                seen[name] = true
+                table.insert(mergedNames, { name = name, source = source })
+                changed = true
+            end
+        end
+        addName(candidate.commonName, "identify")
+        for _, name in ipairs(candidate.allCommonNames or {}) do
+            addName(name, "plantnet")
+        end
+
+        if not existingPreferred or changed then
+            local fields = { commonNames = mergedNames }
+            if not existingPreferred then
+                fields.preferredCommonName = resolvedCommonName
+            end
+            -- Always the bare species -- commonNames/preferredCommonName
+            -- are never cultivar-keyed (see TaxonStore.lua).
+            taxonEntry = TaxonStore.set(candidate.scientificName, fields, existingCultivar)
+        end
+    end
+
+    local caption = formatLabel(resolvedCommonName, candidate.scientificName)
 
     catalog:withWriteAccessDo("Add species identification", function()
         local parentKeyword = catalog:createKeyword(PARENT_KEYWORD_NAME, {}, false, nil, true)
@@ -332,7 +573,7 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
             photo:setRawMetadata("caption", caption)
 
             photo:setPropertyForPlugin(_PLUGIN, "scientificName", candidate.scientificName)
-            photo:setPropertyForPlugin(_PLUGIN, "commonName", candidate.commonName)
+            photo:setPropertyForPlugin(_PLUGIN, "commonName", resolvedCommonName)
             photo:setPropertyForPlugin(_PLUGIN, "taxonRank", rankValue)
             if candidate.id then
                 photo:setPropertyForPlugin(_PLUGIN, "taxonId", tostring(candidate.id))
@@ -349,6 +590,8 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
                         photo:setPropertyForPlugin(_PLUGIN, field, taxonEntry[field])
                     end
                 end
+                photo:setPropertyForPlugin(_PLUGIN, "gardenLocations",
+                    TaxonStore.formatGardenLocations(taxonEntry.gardenLocations, LOCATION_TITLES))
             end
 
             PendingMetadataSave.markIfNeeded(catalog, photo)

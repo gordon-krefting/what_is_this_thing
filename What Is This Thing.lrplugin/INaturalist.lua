@@ -425,6 +425,14 @@ function INaturalist.getMajorAncestryForCandidate(candidate)
         -- iNat: consistency with the source of truth now that we're
         -- resolving through it anyway.
         rank = taxon.rank or candidate.rank,
+        -- Carried through unchanged (2026-08-11) -- Pl@ntNet's full name
+        -- array (see PlantNet.lua) still matters for TaxonStore's
+        -- commonNames list even though commonName itself just got
+        -- overridden above; dropping it here would silently lose it on
+        -- essentially every real Pl@ntNet identification, since this is
+        -- the actual resolution path SpeciesIdentification.lua calls for
+        -- whichever candidate the user picked.
+        allCommonNames = candidate.allCommonNames,
     }
     return updatedCandidate, majorAncestryFromTaxon(taxon)
 end
@@ -857,6 +865,33 @@ end
 -- right context. Conservation Status and Wikipedia URL aren't
 -- place-gated -- they come along for free in the same request regardless.
 --
+-- Extracts every English common name from a `?all_names=true` taxa
+-- response's `names` array ({ name, locale, lexicon, position, is_valid }
+-- per entry, confirmed live 2026-08-11 against a real taxon -- e.g.
+-- Eastern Bluebird genuinely has more than one: "Eastern Bluebird" at
+-- position 0, "Blue-bird" at position 13). Filters to `locale == "en"`
+-- (hardcoded -- no locale-config concept exists anywhere in this
+-- codebase) and `is_valid == true` (skips deprecated/historical names),
+-- sorted by `position` ascending (iNat's own preference/display order).
+-- Tagged `source = "inat"` for TaxonStore's commonNames list. Returns an
+-- empty list, never nil, if `taxon.names` is absent (e.g. the request
+-- didn't ask for it, or the taxon genuinely has none).
+local function extractEnglishCommonNames(taxon)
+    local matches = {}
+    for _, entry in ipairs(taxon.names or {}) do
+        if entry.locale == "en" and entry.is_valid then
+            table.insert(matches, entry)
+        end
+    end
+    table.sort(matches, function(a, b) return (a.position or 0) < (b.position or 0) end)
+
+    local names = {}
+    for _, entry in ipairs(matches) do
+        table.insert(names, { name = entry.name, source = "inat" })
+    end
+    return names
+end
+
 -- Returns a table (possibly with some/all fields nil) -- never errors,
 -- since this is an optional enrichment. Always fetches fresh from the
 -- API; TaxonStore-level caching (so this isn't re-fetched for a species
@@ -866,7 +901,10 @@ function INaturalist.getTaxonFacts(taxonId, lat, lng)
         return {}
     end
 
-    local url = TAXA_URL .. tostring(taxonId) .. "?preferred_place_id=" .. tostring(HOME_PLACE_ID)
+    -- &all_names=true added 2026-08-11 specifically for commonNames below
+    -- -- without it, iNat's response has no `names` array at all, only the
+    -- single `preferred_common_name` already used elsewhere in this file.
+    local url = TAXA_URL .. tostring(taxonId) .. "?preferred_place_id=" .. tostring(HOME_PLACE_ID) .. "&all_names=true"
     local ok, response, hdrs = LrTasks.pcall(LrHttp.get, url)
     if not ok then
         return {}
@@ -898,7 +936,31 @@ function INaturalist.getTaxonFacts(taxonId, lat, lng)
         conservationStatus = pickConservationStatus(taxon),
         establishmentMeans = establishmentMeans,
         wikipediaUrl = taxon.wikipedia_url,
+        commonNames = extractEnglishCommonNames(taxon),
+        -- Added 2026-08-15 for ManageFloraObservation.lua's plant/fungus
+        -- scope gate -- same Plantae/Fungi value space as KINGDOMS_TO_SHOW
+        -- above (both check the SAME iNat vocabulary, just for different
+        -- purposes: that one filters ancestry display, this one gates
+        -- which observations the dialog will touch at all). Free to
+        -- capture here -- KeywordWriter.applyIdentification already calls
+        -- this exactly once per newly-identified species (only when no
+        -- bare TaxonStore entry exists yet), so every species identified
+        -- from now on gets this cached with zero extra requests. Species
+        -- identified before this existed need the separate
+        -- getIconicTaxonName lazy-backfill path below instead.
+        iconicTaxonName = taxon.iconic_taxon_name,
     }
+end
+
+-- Cheap, single-field lookup for the "species was identified before the
+-- iconicTaxonName backfill existed" case -- reuses fetchTaxonDetail rather
+-- than calling getTaxonFacts again, since a full getTaxonFacts refetch
+-- would return only iNat's raw commonNames list and, written back via
+-- TaxonStore.set, would CLOBBER any manually-added or Pl@ntNet-sourced
+-- names already merged into TaxonStore's own commonNames array.
+function INaturalist.getIconicTaxonName(taxonId)
+    local taxon = fetchTaxonDetail(taxonId)
+    return taxon and taxon.iconic_taxon_name
 end
 
 -- Pulls every observation for `username` (paginated, 200/page), optionally
