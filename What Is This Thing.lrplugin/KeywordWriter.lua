@@ -293,69 +293,67 @@ local function buildAncestryChain(catalog, parentKeyword, ancestry)
     return current
 end
 
--- Renames `photo`'s leaf "Species ID" keyword to `newLabel`, preserving
--- whatever ancestry branch (class/order/family/genus, or none) it was
--- already nested under -- unlike applyIdentification's own keyword swap,
--- this doesn't touch or rebuild the ancestry chain at all, since nothing
--- about the taxonomic classification changed, only the common-name text
--- embedded in the leaf's own label. Exported for
+-- Ensures every photo in `photos` (normally one whole observation) has a
+-- leaf "Species ID" keyword matching `newLabel`, removing any other
+-- descendant of the "Species ID" root along the way. Mirrors
+-- applyIdentification's own keyword-swap pattern below exactly -- one
+-- keyword object created ONCE and reused across every photo,
+-- remove-old-then-add-if-missing (via removeOldChildKeywords' object-
+-- identity check, not a name-string comparison), all inside ONE shared
+-- withWriteAccessDo transaction -- rather than a per-photo/
+-- per-transaction/verify-then-remove design tried first, which caused
+-- real, repeated keyword loss in live testing (confirmed 2026-08-17)
+-- despite several mitigation attempts (reordering add/remove, an
+-- in-transaction verification read, isolating each photo into its own
+-- transaction). applyIdentification's pattern has been proven reliable
+-- across every identification this plugin has ever made; this now
+-- follows it instead of reinventing a different, less reliable one --
+-- including getting the case-only-rename scenario right for free
+-- (removeOldChildKeywords' `kw == exceptKeyword` identity check is true
+-- whenever createKeyword's case-insensitive match returns the SAME
+-- keyword already attached, so it's correctly left alone, no special
+-- case needed).
+--
+-- Unlike applyIdentification, doesn't rebuild the ancestry chain --
+-- reuses whatever branch the FIRST photo's existing leaf keyword already
+-- lives under (falling back to the bare "Species ID" root if none has
+-- one yet), since nothing about the taxonomic classification changed
+-- here, only the common-name text embedded in the label. Exported for
 -- ManageFloraObservation.lua's Common Name picker -- editing the
 -- preferred common name there was updating the photo's Caption but
--- leaving this keyword stale (confirmed live 2026-08-17). No-ops if the
--- photo has no existing species keyword (shouldn't happen for an
--- already-identified photo, but cheap to guard) or the label's already
--- correct. Caller must already be inside a catalog:withWriteAccessDo
--- block, same convention as applyIdentification's own per-photo work.
-function KeywordWriter.renameSpeciesKeyword(catalog, photo, newLabel)
+-- leaving this keyword stale (confirmed live 2026-08-17). Self-contained
+-- (owns its own withWriteAccessDo transaction) -- unlike the old
+-- per-photo version, the caller should NOT wrap this in its own
+-- transaction.
+function KeywordWriter.syncSpeciesKeyword(photos, newLabel)
+    if #photos == 0 then
+        return
+    end
+    local catalog = LrApplication.activeCatalog()
     local parentKeyword = findParentKeyword(catalog)
     if not parentKeyword then
         return
     end
 
-    local currentKeywords = photo:getRawMetadata("keywords") or {}
-    local oldLeaf
-    for _, kw in ipairs(currentKeywords) do
-        if isDescendantOf(kw, parentKeyword) then
-            oldLeaf = kw
-            break
+    catalog:withWriteAccessDo("Sync species keyword", function()
+        local branchKeyword = parentKeyword
+        local firstKeywords = photos[1]:getRawMetadata("keywords") or {}
+        for _, kw in ipairs(firstKeywords) do
+            if isDescendantOf(kw, parentKeyword) then
+                branchKeyword = kw:getParent() or parentKeyword
+                break
+            end
         end
-    end
-    if not oldLeaf or oldLeaf:getName() == newLabel then
-        return
-    end
 
-    -- Each SDK call isolated in its own LrTasks.pcall -- confirmed live
-    -- 2026-08-17 that this whole function throws "assertion failed!" for
-    -- SOME migrated photos (never for normally-identified ones), and that
-    -- message carries no detail even when caught by an OUTER pcall (see
-    -- ManageFloraObservation.lua's own call site) -- isolating which
-    -- SPECIFIC call fails is the only way left to narrow this down
-    -- further, since the message text itself is a dead end.
-    local okParent, parentResult = LrTasks.pcall(function() return oldLeaf:getParent() end)
-    if not okParent then
-        error(string.format("getParent() on old leaf %q failed: %s", oldLeaf:getName(), tostring(parentResult)))
-    end
-    local branchKeyword = parentResult or parentKeyword
+        local newKeyword = catalog:createKeyword(newLabel, {}, true, branchKeyword, true)
 
-    local okCreate, newLeaf = LrTasks.pcall(function()
-        return catalog:createKeyword(newLabel, {}, true, branchKeyword, true)
+        for _, photo in ipairs(photos) do
+            local alreadyHasNew = removeOldChildKeywords(photo, parentKeyword, newKeyword)
+            if not alreadyHasNew then
+                photo:addKeyword(newKeyword)
+            end
+        end
     end)
-    if not okCreate then
-        error(string.format(
-            "createKeyword(%q, parent=%q) failed: %s",
-            newLabel, branchKeyword and branchKeyword:getName() or "(nil)", tostring(newLeaf)
-        ))
-    end
-
-    local okRemove, removeErr = LrTasks.pcall(function() photo:removeKeyword(oldLeaf) end)
-    if not okRemove then
-        error(string.format("removeKeyword(%q) failed: %s", oldLeaf:getName(), tostring(removeErr)))
-    end
-
-    local okAdd, addErr = LrTasks.pcall(function() photo:addKeyword(newLeaf) end)
-    if not okAdd then
-        error(string.format("addKeyword(%q) failed: %s", newLabel, tostring(addErr)))
-    end
 end
 
 -- Recursively fills `map[name] = keyword` for every keyword nested anywhere

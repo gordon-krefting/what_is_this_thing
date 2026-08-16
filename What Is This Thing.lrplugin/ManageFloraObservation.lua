@@ -456,6 +456,11 @@ LrTasks.startAsyncTask(function()
         end
         existingCommonNames = normalized
     end
+    -- Same reasoning as existingCommonNames above -- preferredCommonName
+    -- can predate Title Case normalization too, and it feeds both this
+    -- dialog's default radio selection (below) and the fallback value
+    -- saved back to TaxonStore if the user doesn't change anything.
+    existing.preferredCommonName = titleCase(existing.preferredCommonName)
     local existingLocations = existing.gardenLocations or {}
 
     -- gardenLocation's value list is shared by both the specimen's own
@@ -844,6 +849,13 @@ LrTasks.startAsyncTask(function()
     else
         preferredCommonNameValue = props.commonNameChoice
     end
+    -- Defensive re-normalization -- every path above should already
+    -- resolve to Title Case (existingCommonNames/existing.preferredCommonName
+    -- are normalized on read above, and the "Add new" path normalizes
+    -- explicitly), but this guarantees the keyword and caption this
+    -- dialog actually writes are never the one place a stale casing slips
+    -- through, regardless of how preferredCommonNameValue got resolved.
+    preferredCommonNameValue = titleCase(preferredCommonNameValue)
 
     -- Resolved from the dialog's own Cultivar field, not the `cultivar`
     -- read before the dialog opened -- that original value only governs
@@ -990,18 +1002,21 @@ LrTasks.startAsyncTask(function()
         end
     end
 
-    -- Photos needing their "Species ID" keyword renamed -- collected
-    -- here, actually renamed in a SEPARATE, LATER transaction below (not
-    -- inline in the main loop). Confirmed live 2026-08-17 ("assertion
-    -- failed!" on every save that changed the common name): keyword
-    -- mutation isn't safe to interleave with this transaction's OTHER
-    -- writes to the same photo -- same class of constraint already found
-    -- for catalog:createCollection + getPhotos (see
+    -- Photos needing their "Species ID" keyword synced to the new common
+    -- name -- collected here, actually synced in a SEPARATE, LATER call
+    -- below (not inline in the main loop). Confirmed live 2026-08-17
+    -- ("assertion failed!" on every save that changed the common name):
+    -- keyword mutation isn't safe to interleave with this transaction's
+    -- OTHER writes to the same photo -- same class of constraint already
+    -- found for catalog:createCollection + getPhotos (see
     -- feedback_verify_sdk_limitations) -- querying/mutating a keyword
     -- tree right alongside unrelated property writes in one transaction
     -- apparently isn't safe either, just a different SDK surface hitting
-    -- the same underlying lesson.
-    local keywordRenames = {}
+    -- the same underlying lesson. All entries share the same label (one
+    -- common name per observation), so only the photo list needs
+    -- collecting -- keywordLabel is set once below.
+    local keywordPhotos = {}
+    local keywordLabel = nil
 
     catalog:withWriteAccessDo("Manage local flora observation", function()
         for _, photo in ipairs(touchedPhotos) do
@@ -1021,12 +1036,13 @@ LrTasks.startAsyncTask(function()
                 -- always just the bare scientificName (same convention
                 -- KeywordWriter.applyIdentification already uses), which
                 -- doesn't change based on common name. The matching
-                -- "Species ID" keyword is queued for its own later
-                -- transaction, not renamed here -- see keywordRenames'
-                -- own comment above.
+                -- "Species ID" keyword is queued for its own later sync
+                -- call, not touched here -- see keywordPhotos' own
+                -- comment above.
                 local newCaption = formatCaption(preferredCommonNameValue, scientificName)
                 photo:setRawMetadata("caption", newCaption)
-                table.insert(keywordRenames, { photo = photo, label = newCaption })
+                table.insert(keywordPhotos, photo)
+                keywordLabel = newCaption
             end
 
             if isInObservation[photo] then
@@ -1045,43 +1061,34 @@ LrTasks.startAsyncTask(function()
         end
     end)
 
-    -- Confirmed live 2026-08-17: fails ONLY for photos that came through
-    -- the PlantBook migration (not ones identified normally via Species
-    -- Identification) -- root cause not yet pinned down (Lightroom's own
-    -- "assertion failed!" gives no detail), but SOMETHING about a
-    -- migrated photo's existing keyword state trips it. Per-photo
-    -- LrTasks.pcall (matching this project's own established convention
-    -- for yield-capable catalog calls) so one photo's failure can't take
-    -- down the whole save -- every OTHER write in this dialog (caption,
-    -- specimen fields, etc.) already committed in the transaction above
-    -- regardless of what happens here. keywordRenameError keeps the
-    -- FIRST real Lua error message seen, surfaced in the summary below,
-    -- specifically to get more diagnostic detail than Lightroom's own
-    -- generic dialog provides.
-    local keywordRenameFailures = 0
-    local keywordRenameError = nil
-    if #keywordRenames > 0 then
-        catalog:withWriteAccessDo("Manage local flora observation (keyword sync)", function()
-            for _, entry in ipairs(keywordRenames) do
-                local ok, err = LrTasks.pcall(KeywordWriter.renameSpeciesKeyword, catalog, entry.photo, entry.label)
-                if not ok then
-                    keywordRenameFailures = keywordRenameFailures + 1
-                    keywordRenameError = keywordRenameError or tostring(err)
-                end
-            end
-        end)
+    -- Mirrors applyIdentification's own proven keyword-swap pattern (see
+    -- KeywordWriter.syncSpeciesKeyword's own doc comment for the full
+    -- history) -- one shared keyword created once and applied across the
+    -- whole batch in ONE transaction, rather than the earlier
+    -- per-photo/per-transaction/verify-then-remove design that caused
+    -- real, repeated keyword loss in live testing (confirmed 2026-08-17)
+    -- across several different mitigation attempts. One pcall for the
+    -- whole batch, matching how confidently applyIdentification itself is
+    -- already called elsewhere -- every OTHER write in this dialog
+    -- (caption, specimen fields, etc.) already committed in the
+    -- transaction above regardless of what happens here.
+    local keywordSyncFailed = false
+    local keywordSyncError = nil
+    if #keywordPhotos > 0 then
+        local ok, err = LrTasks.pcall(KeywordWriter.syncSpeciesKeyword, keywordPhotos, keywordLabel)
+        if not ok then
+            keywordSyncFailed = true
+            keywordSyncError = tostring(err)
+        end
     end
 
     local summaryParts = {
         string.format("%d photo%s updated.", #touchedPhotos, #touchedPhotos == 1 and "" or "s"),
     }
-    if keywordRenameFailures > 0 then
+    if keywordSyncFailed then
         table.insert(
             summaryParts,
-            string.format(
-                "Caption updated, but the matching keyword failed to sync on %d photo%s: %s",
-                keywordRenameFailures, keywordRenameFailures == 1 and "" or "s", tostring(keywordRenameError)
-            )
+            string.format("Caption updated, but the matching keyword failed to sync: %s", keywordSyncError)
         )
     end
     if #keptFromLinkTitles > 0 then
