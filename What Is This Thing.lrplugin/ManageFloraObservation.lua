@@ -1,5 +1,6 @@
 local LrApplication = import 'LrApplication'
 local LrDialogs = import 'LrDialogs'
+local LrHttp = import 'LrHttp'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 local LrBinding = import 'LrBinding'
@@ -638,7 +639,26 @@ LrTasks.startAsyncTask(function()
             f:static_text { title = "Reference (read-only, from iNaturalist):" },
             f:static_text { title = "Conservation status: " .. (existing.conservationStatus or "(unknown)") },
             f:static_text { title = "Establishment means: " .. (existing.establishmentMeans or "(unknown)") },
-            f:static_text { title = "Wikipedia: " .. (existing.wikipediaUrl or "(none)") },
+            f:row {
+                f:static_text { title = "iNat Taxon Page:", width_in_chars = 22 },
+                taxonId
+                    and f:push_button {
+                        title = "Open",
+                        action = function()
+                            LrHttp.openUrlInBrowser("https://www.inaturalist.org/taxa/" .. tostring(taxonId))
+                        end,
+                    }
+                    or f:static_text { title = "(none)" },
+            },
+            f:row {
+                f:static_text { title = "Wikipedia:", width_in_chars = 22 },
+                existing.wikipediaUrl
+                    and f:push_button {
+                        title = "Open",
+                        action = function() LrHttp.openUrlInBrowser(existing.wikipediaUrl) end,
+                    }
+                    or f:static_text { title = "(none)" },
+            },
         }
 
         -- --- Tab 2: Location ---

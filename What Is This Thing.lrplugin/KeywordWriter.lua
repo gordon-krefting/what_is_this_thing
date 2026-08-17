@@ -507,10 +507,26 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
     -- comment above for the full rationale.
     local resolvedCommonName = titleCase(candidate.commonName)
     do
-        local existingPreferred = taxonEntry and taxonEntry.preferredCommonName
+        -- titleCase here too, not just on candidate.commonName above --
+        -- a species identified before Title Case normalization existed
+        -- can have a stale, un-normalized preferredCommonName already
+        -- sitting in TaxonStore, which would otherwise silently override
+        -- the freshly-normalized value above with the old casing on every
+        -- later identification of that same species (confirmed live
+        -- 2026-08-17 -- same gap already closed for
+        -- ManageFloraObservation.lua's own existing.preferredCommonName
+        -- read, just missed here).
+        local rawPreferred = taxonEntry and taxonEntry.preferredCommonName
+        local existingPreferred = rawPreferred and titleCase(rawPreferred)
         if existingPreferred then
             resolvedCommonName = existingPreferred
         end
+        -- Was the stored value itself stale-cased? Write the corrected
+        -- casing back to TaxonStore below (not just used for this run's
+        -- output) so re-identifying a species also self-heals its stored
+        -- preferredCommonName permanently, same as ManageFloraObservation.lua
+        -- already does for its own copy of this field.
+        local preferredNeedsRewrite = existingPreferred and existingPreferred ~= rawPreferred
 
         -- Tracked directly rather than via a before/after count comparison
         -- -- titleCase normalization can now SHRINK the merged list (two
@@ -544,9 +560,9 @@ function KeywordWriter.applyIdentification(photos, candidate, ancestry)
             addName(name, "plantnet")
         end
 
-        if not existingPreferred or changed then
+        if not existingPreferred or preferredNeedsRewrite or changed then
             local fields = { commonNames = mergedNames }
-            if not existingPreferred then
+            if not existingPreferred or preferredNeedsRewrite then
                 fields.preferredCommonName = resolvedCommonName
             end
             -- Always the bare species -- commonNames/preferredCommonName
